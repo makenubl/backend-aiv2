@@ -1,0 +1,51 @@
+{
+  "id": "VASP-2025-001",
+  "companyName": "HTX Global (Newest Tycoon Limited)",
+  "applicationDate": "2025-12-09",
+  "submittedBy": "Jennifer Lee",
+  "submitterEmail": "j.lee@htx.com",
+  "submitterPhone": "+852-9876-5432",
+  "appName": "HTX Global Trading Platform",
+  "appVendor": "Newest Tycoon Limited",
+  "appVersion": "2025.12",
+  "appDescription": "World-leading digital economy platform founded in 2013 with presence in 160+ countries. Comprehensive crypto ecosystem offering exchange services, derivatives trading, OTC brokerage, and custody solutions. Licensed in Lithuania, Dubai, Australia, and Bahrain. Mission to create blockchain technology breakthroughs and integrate into mainstream industries.",
+  "aiCapabilities": [
+    "AML Transaction Monitoring",
+    "KYC Automation",
+    "Fraud Detection",
+    "Risk Scoring",
+    "Market Surveillance",
+    "Insider Trading Prevention",
+    "Behavioral Analytics",
+    "Suspicious Pattern Detection"
+  ],
+  "dataUsage": "User identity (KYC/AML), transaction history, wallet addresses, trading patterns, device fingerprints, IP geolocation, financial statements, beneficial ownership data",
+  "businessPlan": "HTX aims to establish Pakistan as strategic South Asian hub with projected 50,000 users in year 1, growing to 500,000 by year 3. Revenue model: 0.2% spot trading fees, 0.04% derivatives taker fees, OTC premium services. Investment: $2M initial setup, $500K annual operating costs. Target segments: retail traders (60%), institutional clients (25%), OTC high-net-worth (15%).",
+  "regulatoryHistory": "Licensed in: Lithuania (FCIS License), Dubai (VARA Operational MVP), Australia (DCE Registration), Bahrain (Crypto-Asset Service Provider). No regulatory sanctions in past 5 years. Cooperates with global regulators including SEC, FCA, MAS.",
+  "technicalArchitecture": "Multi-layer architecture: Cold wallet storage (95% assets), hot wallets for liquidity (5%), multi-signature approval, hardware security modules (HSM), AWS cloud infrastructure with DDoS protection, 99.95% uptime SLA, daily reconciliation, real-time monitoring.",
+  "marketingPlan": "Digital marketing via Pakistani influencers, educational webinars in Urdu, partnerships with tech universities, sponsorship of fintech events, referral programs, institutional outreach to family offices.",
+  "complianceFramework": "KYC: Identity verification via NADRA integration, AML: Transaction monitoring with Chainalysis, CFT: Sanctions screening against FATF lists, Data Protection: GDPR-compliant infrastructure, Cybersecurity: ISO 27001 certified.",
+  "riskManagement": "Multi-layer cold storage, insurance coverage up to $300M, emergency shutdown procedures, customer fund segregation, regular third-party audits, incident response team 24/7.",
+  "financialProjections": {
+    "year1Revenue": 1200000,
+    "year2Revenue": 4500000,
+    "year3Revenue": 12000000,
+    "breakEvenMonth": 18
+  },
+  "teamSize": 350,
+  "pakistanTeamPlan": "Hiring plan: 2 compliance officers, 1 MLRO, 2 customer support agents (Urdu/English), 1 operations manager within 3 months of NOC approval.",
+  "documents": [
+    "20251209 Nest Services Limited - A3 Forms (Ying Pok Cheung).pdf",
+    "FORM A1 — APPLICATION FOR No Objection Certificate (signed) v.2（1）.docx",
+    "FORM A3 - CFO & Director (ryan).pdf",
+    "FORM A3 - Director (heidi).docx",
+    "FORM A3 MLRO & Compliance officer (sunny).docx",
+    "FORM A5 — OUTSOURCING DECLARATION & REGISTER (signed).docx",
+    "board_resolution-for_pakistan_noc_application-signed.pdf",
+    "AML.pdf",
+    "MoIT.pdf",
+    "Ordnance.pdf",
+    "SBP Comments on AML Registration Regulations.pdf",
+    "SECP Resp on AML Reg.pdf"
+  ]
+}
