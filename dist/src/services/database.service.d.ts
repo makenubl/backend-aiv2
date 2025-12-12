@@ -1,4 +1,4 @@
-import { Collection } from 'mongodb';
+import { Db, Collection } from 'mongodb';
 interface User {
     _id?: string;
     username: string;
@@ -18,6 +18,7 @@ interface StoredEvaluation {
 }
 export declare const connectDatabase: () => Promise<void>;
 export declare const disconnectDatabase: () => Promise<void>;
+export declare const getDatabase: () => Db;
 export declare const getUsersCollection: () => Collection<User>;
 export declare const findUserByUsername: (username: string) => Promise<User | null>;
 export declare const findUserByEmail: (email: string) => Promise<User | null>;
@@ -30,6 +31,7 @@ export declare const getAllEvaluations: () => Promise<StoredEvaluation[]>;
 declare const _default: {
     connectDatabase: () => Promise<void>;
     disconnectDatabase: () => Promise<void>;
+    getDatabase: () => Db;
     getUsersCollection: () => Collection<User>;
     findUserByUsername: (username: string) => Promise<User | null>;
     findUserByEmail: (email: string) => Promise<User | null>;
