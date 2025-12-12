@@ -21,8 +21,9 @@ app.use(cors({
     const isVercel = origin.includes('.vercel.app');
     const isRender = origin.includes('.onrender.com');
     const isRailway = origin.includes('.railway.app');
+    const isPvaraDomain = origin && (origin.includes('pvara.team') || origin.includes('pvara.gov.pk'));
     
-    if (isListed || isLocalhost || isVercel || isRender || isRailway) return callback(null, true);
+    if (isListed || isLocalhost || isVercel || isRender || isRailway || isPvaraDomain) return callback(null, true);
     
     console.warn(`CORS: Origin not allowed: ${origin}`);
     return callback(new Error(`CORS: Origin not allowed: ${origin}`));

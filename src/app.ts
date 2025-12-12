@@ -18,8 +18,9 @@ app.use(cors({
     const isListed = allowed.includes(origin);
     const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1):\d{2,5}$/i.test(origin);
     const isVercel = origin.includes('.vercel.app');
+    const isPvaraDomain = origin && (origin.includes('pvara.team') || origin.includes('pvara.gov.pk'));
     
-    if (isListed || isLocalhost || isVercel) return callback(null, true);
+    if (isListed || isLocalhost || isVercel || isPvaraDomain) return callback(null, true);
     
     console.warn(`CORS: Origin not allowed: ${origin}`);
     return callback(new Error(`CORS: Origin not allowed: ${origin}`));
