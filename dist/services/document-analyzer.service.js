@@ -59,6 +59,8 @@ const DOCUMENT_PATTERNS = [
     { pattern: /agreement|contract/i, category: 'legal', subcategory: 'Agreement' },
     { pattern: /noc|no.*objection/i, category: 'legal', subcategory: 'NOC Application' },
 ];
+// Cache for AI document categorization to avoid repeated OpenAI calls
+const documentCategorizationCache = new Map();
 class DocumentAnalyzerService {
     constructor() {
         this.openai = new openai_1.OpenAI({
@@ -68,9 +70,16 @@ class DocumentAnalyzerService {
     // (Removed unused extractTextContent helper to satisfy strict TS settings)
     /**
      * AI-based categorization of a single document using filename and optional content snippet.
+     * Results are cached to avoid repeated OpenAI calls.
      */
     async categorizeDocumentWithAI(_applicationId, companyName, filePath, displayName) {
         const name = displayName || filePath.split('/').pop() || filePath;
+        // Check cache first - use filePath as unique key
+        const cacheKey = `${filePath}|${companyName}`;
+        if (documentCategorizationCache.has(cacheKey)) {
+            console.log(`[DocumentCache] Returning cached categorization for ${name}`);
+            return documentCategorizationCache.get(cacheKey);
+        }
         const contentSnippet = await (async () => {
             try {
                 const ext = filePath.toLowerCase();
@@ -129,9 +138,9 @@ Provide specific subcategory (e.g., "Certificate of Incorporation", "AML Policy"
 Respond strictly as JSON with keys: {"category": string, "pvaraCategory": string, "subcategory": string, "confidence": number (0-1), "notes": string}.`;
         try {
             const response = await this.openai.chat.completions.create({
-                model: 'gpt-5.2',
+                model: 'gpt-4o',
                 messages: [{ role: 'user', content: basePrompt }],
-                max_tokens: 1000,
+                max_completion_tokens: 1000,
             });
             const content = response.choices[0]?.message?.content || '{}';
             let parsed;
@@ -148,7 +157,7 @@ Respond strictly as JSON with keys: {"category": string, "pvaraCategory": string
             const confidence = typeof parsed.confidence === 'number' ? Math.max(0, Math.min(1, parsed.confidence)) : 0.6;
             const notes = parsed.notes || 'AI classification';
             const pvaraCategory = parsed.pvaraCategory || 'supporting-document';
-            return {
+            const result = {
                 name,
                 category,
                 subcategory,
@@ -157,14 +166,21 @@ Respond strictly as JSON with keys: {"category": string, "pvaraCategory": string
                 pvaraCategory,
                 applicantName: companyName
             };
+            // Cache the result
+            documentCategorizationCache.set(cacheKey, result);
+            console.log(`[DocumentCache] Cached categorization for ${name}`);
+            return result;
         }
         catch (error) {
             console.error('AI categorizeDocument error:', error);
             const fallback = this.categorizeDocument(name);
-            return {
+            const result = {
                 ...fallback,
                 applicantName: companyName
             };
+            // Cache even fallback results to avoid re-processing
+            documentCategorizationCache.set(cacheKey, result);
+            return result;
         }
     }
     /**
@@ -255,9 +271,9 @@ Please provide:
 Format your response as a structured analysis.`;
         try {
             const response = await this.openai.chat.completions.create({
-                model: 'gpt-5.2',
+                model: 'gpt-4o',
                 messages: [{ role: 'user', content: prompt }],
-                max_tokens: 2500
+                max_completion_tokens: 2500
             });
             return response.choices[0].message.content || 'AI analysis completed.';
         }

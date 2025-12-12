@@ -8,7 +8,6 @@ require("express-async-errors");
 const cors_1 = __importDefault(require("cors"));
 const config_1 = require("./config");
 const auth_middleware_1 = require("./middleware/auth.middleware");
-const database_service_1 = require("./services/database.service");
 const evaluation_routes_1 = __importDefault(require("./routes/evaluation.routes"));
 const applications_routes_1 = __importDefault(require("./routes/applications.routes"));
 const auth_routes_1 = __importDefault(require("./routes/auth.routes"));
@@ -22,9 +21,7 @@ app.use((0, cors_1.default)({
         const isListed = allowed.includes(origin);
         const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1):\d{2,5}$/i.test(origin);
         const isVercel = origin.includes('.vercel.app');
-        const isRender = origin.includes('.onrender.com');
-        const isRailway = origin.includes('.railway.app');
-        if (isListed || isLocalhost || isVercel || isRender || isRailway)
+        if (isListed || isLocalhost || isVercel)
             return callback(null, true);
         console.warn(`CORS: Origin not allowed: ${origin}`);
         return callback(new Error(`CORS: Origin not allowed: ${origin}`));
@@ -43,6 +40,7 @@ app.get('/health', (_req, res) => {
         status: 'ok',
         timestamp: new Date(),
         mongoUri: process.env.MONGODB_URI ? 'SET' : 'NOT SET',
+        apiKey: process.env.API_KEY ? 'SET' : 'NOT SET',
         nodeEnv: process.env.NODE_ENV || 'not set'
     });
 });
@@ -51,6 +49,7 @@ app.get('/api/health', (_req, res) => {
         status: 'ok',
         timestamp: new Date(),
         mongoUri: process.env.MONGODB_URI ? 'SET' : 'NOT SET',
+        apiKey: process.env.API_KEY ? 'SET' : 'NOT SET',
         nodeEnv: process.env.NODE_ENV || 'not set'
     });
 });
@@ -63,22 +62,5 @@ app.use('/api/evaluation', evaluation_routes_1.default);
 app.use('/api/applications', applications_routes_1.default);
 // Error handling
 app.use(auth_middleware_1.errorHandler);
-// Start server
-const PORT = process.env.PORT || config_1.config.PORT || 3001;
-// Initialize database and start server
-(async () => {
-    try {
-        await (0, database_service_1.connectDatabase)();
-        await (0, database_service_1.seedDefaultUsers)();
-        app.listen(PORT, () => {
-            console.log(`✅ NOC Evaluator Backend running on port ${PORT}`);
-            console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-        });
-    }
-    catch (error) {
-        console.error('Failed to start server:', error);
-        process.exit(1);
-    }
-})();
 exports.default = app;
-//# sourceMappingURL=server.js.map
+//# sourceMappingURL=app.js.map

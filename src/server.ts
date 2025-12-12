@@ -11,18 +11,18 @@ import authRoutes from './routes/auth.routes';
 const app = express();
 
 // Middleware
-// Allow configured origins and any localhost/127.0.0.1 port in development
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, Postman, or server-to-server)
     if (!origin) return callback(null, true);
     
     const allowed = Array.isArray(config.CORS_ORIGIN) ? config.CORS_ORIGIN : [config.CORS_ORIGIN as any];
     const isListed = allowed.includes(origin);
     const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1):\d{2,5}$/i.test(origin);
     const isVercel = origin.includes('.vercel.app');
+    const isRender = origin.includes('.onrender.com');
+    const isRailway = origin.includes('.railway.app');
     
-    if (isListed || isLocalhost || isVercel) return callback(null, true);
+    if (isListed || isLocalhost || isVercel || isRender || isRailway) return callback(null, true);
     
     console.warn(`CORS: Origin not allowed: ${origin}`);
     return callback(new Error(`CORS: Origin not allowed: ${origin}`));
@@ -31,7 +31,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-api-key'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
-  maxAge: 600 // Cache preflight for 10 minutes
+  maxAge: 600
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
@@ -42,7 +42,6 @@ app.get('/health', (_req, res) => {
     status: 'ok', 
     timestamp: new Date(),
     mongoUri: process.env.MONGODB_URI ? 'SET' : 'NOT SET',
-    apiKey: process.env.API_KEY ? 'SET' : 'NOT SET',
     nodeEnv: process.env.NODE_ENV || 'not set'
   });
 });
@@ -52,7 +51,6 @@ app.get('/api/health', (_req, res) => {
     status: 'ok', 
     timestamp: new Date(),
     mongoUri: process.env.MONGODB_URI ? 'SET' : 'NOT SET',
-    apiKey: process.env.API_KEY ? 'SET' : 'NOT SET',
     nodeEnv: process.env.NODE_ENV || 'not set'
   });
 });
@@ -71,7 +69,7 @@ app.use('/api/applications', applicationsRoutes);
 app.use(errorHandler);
 
 // Start server
-const PORT = config.PORT;
+const PORT = process.env.PORT || config.PORT || 3001;
 
 // Initialize database and start server
 (async () => {
@@ -81,7 +79,7 @@ const PORT = config.PORT;
     
     app.listen(PORT, () => {
       console.log(`✅ NOC Evaluator Backend running on port ${PORT}`);
-      console.log(`Environment: ${config.NODE_ENV}`);
+      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

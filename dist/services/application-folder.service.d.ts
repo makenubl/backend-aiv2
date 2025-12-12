@@ -82,6 +82,7 @@ declare class ApplicationFolderService {
     private scanDocuments;
     /**
      * Perform comprehensive due diligence evaluation
+     * Results are stored in MongoDB and cached in memory
      */
     evaluateApplication(applicationId: string): Promise<ComprehensiveEvaluation>;
     private checkCorporateVerification;

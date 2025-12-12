@@ -37,6 +37,9 @@ exports.applicationFolderService = void 0;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const document_analyzer_service_1 = require("./document-analyzer.service");
+const database_service_1 = require("./database.service");
+// Cache for evaluations to avoid repeated OpenAI calls
+const evaluationCache = new Map();
 class ApplicationFolderService {
     constructor() {
         // Look for applications in the parent directory (workspace root)
@@ -136,8 +139,26 @@ class ApplicationFolderService {
     }
     /**
      * Perform comprehensive due diligence evaluation
+     * Results are stored in MongoDB and cached in memory
      */
     async evaluateApplication(applicationId) {
+        // Check in-memory cache first
+        if (evaluationCache.has(applicationId)) {
+            console.log(`[EvaluationCache] Returning memory-cached evaluation for ${applicationId}`);
+            return evaluationCache.get(applicationId);
+        }
+        // Check MongoDB cache
+        try {
+            const storedEvaluation = await (0, database_service_1.getEvaluation)(applicationId);
+            if (storedEvaluation) {
+                console.log(`[MongoDB] Returning stored evaluation for ${applicationId}`);
+                evaluationCache.set(applicationId, storedEvaluation);
+                return storedEvaluation;
+            }
+        }
+        catch (error) {
+            console.warn(`[MongoDB] Could not retrieve evaluation for ${applicationId}:`, error);
+        }
         const applications = await this.scanApplications();
         const app = applications.find(a => a.id === applicationId);
         if (!app) {
@@ -237,7 +258,7 @@ class ApplicationFolderService {
         }
         // Generate next steps and conditions
         const { nextSteps, conditions } = this.generateNextStepsAndConditions(recommendation, comments);
-        return {
+        const evaluation = {
             applicationId: app.id,
             overallScore: scores.overall,
             riskLevel: scores.riskLevel,
@@ -259,11 +280,22 @@ class ApplicationFolderService {
             },
             aiInsights,
             aiDocumentCategories: aiDocCategories,
-            modelUsed: 'gpt-5.2',
+            modelUsed: 'gpt-4o',
             nextSteps,
             conditions,
             evaluatedAt: new Date()
         };
+        // Cache in memory
+        evaluationCache.set(applicationId, evaluation);
+        console.log(`[EvaluationCache] Cached evaluation for ${applicationId}`);
+        // Save to MongoDB for persistence
+        try {
+            await (0, database_service_1.saveEvaluation)(applicationId, evaluation);
+        }
+        catch (error) {
+            console.error(`[MongoDB] Failed to save evaluation for ${applicationId}:`, error);
+        }
+        return evaluation;
     }
     checkCorporateVerification(data, comments) {
         const issues = [];

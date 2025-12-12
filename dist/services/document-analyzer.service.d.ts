@@ -21,6 +21,7 @@ declare class DocumentAnalyzerService {
     constructor();
     /**
      * AI-based categorization of a single document using filename and optional content snippet.
+     * Results are cached to avoid repeated OpenAI calls.
      */
     categorizeDocumentWithAI(_applicationId: string, companyName: string, filePath: string, displayName?: string): Promise<DocumentCategory>;
     /**
