@@ -7,18 +7,24 @@ const server_1 = __importDefault(require("../src/server"));
 const database_service_1 = require("../src/services/database.service");
 // Initialize database connection (only once per cold start)
 let isInitialized = false;
+let initError = null;
 const initializeDatabase = async () => {
-    if (!isInitialized) {
-        try {
-            await (0, database_service_1.connectDatabase)();
-            await (0, database_service_1.seedDefaultUsers)();
-            isInitialized = true;
-            console.log('✅ Database initialized for serverless function');
-        }
-        catch (error) {
-            console.error('Failed to initialize database:', error);
-            throw error;
-        }
+    if (isInitialized)
+        return;
+    if (initError)
+        throw initError;
+    try {
+        console.log('🔄 Initializing database connection...');
+        console.log('MONGODB_URI exists:', !!process.env.MONGODB_URI);
+        await (0, database_service_1.connectDatabase)();
+        await (0, database_service_1.seedDefaultUsers)();
+        isInitialized = true;
+        console.log('✅ Database initialized for serverless function');
+    }
+    catch (error) {
+        console.error('❌ Failed to initialize database:', error);
+        initError = error;
+        throw error;
     }
 };
 // Serverless function handler
@@ -29,7 +35,11 @@ exports.default = async (req, res) => {
     }
     catch (error) {
         console.error('Serverless function error:', error);
-        return res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({
+            error: 'Internal server error',
+            message: error?.message || 'Unknown error',
+            mongoUri: process.env.MONGODB_URI ? 'SET' : 'NOT SET'
+        });
     }
 };
 //# sourceMappingURL=index.js.map

@@ -37,6 +37,25 @@ app.use((0, cors_1.default)({
 }));
 app.use(express_1.default.json({ limit: '10mb' }));
 app.use(express_1.default.urlencoded({ limit: '10mb', extended: true }));
+// Health check (before any auth)
+app.get('/health', (_req, res) => {
+    res.json({
+        status: 'ok',
+        timestamp: new Date(),
+        mongoUri: process.env.MONGODB_URI ? 'SET' : 'NOT SET',
+        apiKey: process.env.API_KEY ? 'SET' : 'NOT SET',
+        nodeEnv: process.env.NODE_ENV || 'not set'
+    });
+});
+app.get('/api/health', (_req, res) => {
+    res.json({
+        status: 'ok',
+        timestamp: new Date(),
+        mongoUri: process.env.MONGODB_URI ? 'SET' : 'NOT SET',
+        apiKey: process.env.API_KEY ? 'SET' : 'NOT SET',
+        nodeEnv: process.env.NODE_ENV || 'not set'
+    });
+});
 // Auth routes (no API key required)
 app.use('/api/auth', auth_routes_1.default);
 // Ring-fenced: API key validation for other routes
@@ -44,10 +63,6 @@ app.use(auth_middleware_1.apiKeyMiddleware);
 // Routes
 app.use('/api/evaluation', evaluation_routes_1.default);
 app.use('/api/applications', applications_routes_1.default);
-// Health check
-app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', timestamp: new Date() });
-});
 // Error handling
 app.use(auth_middleware_1.errorHandler);
 // Start server

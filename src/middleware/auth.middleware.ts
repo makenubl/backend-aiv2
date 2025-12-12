@@ -1,6 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
 
-export const apiKeyMiddleware = (_req: Request, res: Response, next: NextFunction): void => {
+export const apiKeyMiddleware = (req: Request, res: Response, next: NextFunction): void => {
+  // Skip auth for health and diagnostic endpoints
+  if (req.path === '/health' || req.path === '/api/health' || req.path === '/debug') {
+    next();
+    return;
+  }
+
   // Allow all requests in development mode
   const isDevelopment = process.env.NODE_ENV === 'development' || !process.env.NODE_ENV;
   
@@ -17,7 +23,7 @@ export const apiKeyMiddleware = (_req: Request, res: Response, next: NextFunctio
   }
 
   // Ring-fenced: Validate API key for all requests in production
-  const apiKey = _req.headers['x-api-key'] as string;
+  const apiKey = req.headers['x-api-key'] as string;
 
   if (!apiKey || apiKey !== validKey) {
     res.status(401).json({ error: 'Unauthorized: Invalid API key' });

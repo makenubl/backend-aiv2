@@ -1,7 +1,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.errorHandler = exports.apiKeyMiddleware = void 0;
-const apiKeyMiddleware = (_req, res, next) => {
+const apiKeyMiddleware = (req, res, next) => {
+    // Skip auth for health and diagnostic endpoints
+    if (req.path === '/health' || req.path === '/api/health' || req.path === '/debug') {
+        next();
+        return;
+    }
     // Allow all requests in development mode
     const isDevelopment = process.env.NODE_ENV === 'development' || !process.env.NODE_ENV;
     if (isDevelopment) {
@@ -15,7 +20,7 @@ const apiKeyMiddleware = (_req, res, next) => {
         return;
     }
     // Ring-fenced: Validate API key for all requests in production
-    const apiKey = _req.headers['x-api-key'];
+    const apiKey = req.headers['x-api-key'];
     if (!apiKey || apiKey !== validKey) {
         res.status(401).json({ error: 'Unauthorized: Invalid API key' });
         return;
