@@ -7,6 +7,7 @@ import { connectDatabase, seedDefaultUsers } from './services/database.service';
 import evaluationRoutes from './routes/evaluation.routes';
 import applicationsRoutes from './routes/applications.routes';
 import authRoutes from './routes/auth.routes';
+import storageRoutes from './routes/storage.routes';
 
 const app = express();
 
@@ -65,6 +66,7 @@ app.use(apiKeyMiddleware);
 // Routes
 app.use('/api/evaluation', evaluationRoutes);
 app.use('/api/applications', applicationsRoutes);
+app.use('/api/storage', storageRoutes);
 
 // Error handling
 app.use(errorHandler);

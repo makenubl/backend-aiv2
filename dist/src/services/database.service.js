@@ -1,88 +1,55 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getAllEvaluations = exports.getEvaluation = exports.saveEvaluation = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.getDatabase = exports.disconnectDatabase = exports.connectDatabase = void 0;
+exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.getEvaluation = exports.saveEvaluation = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.connectDatabase = void 0;
 const mongodb_1 = require("mongodb");
-let mongoClient = null;
-let database = null;
-let isConnecting = false;
-const MONGO_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/pvara_ai_eval';
+let mongoClient;
+let database;
+const MONGO_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017';
 const DB_NAME = process.env.DB_NAME || 'pvara_ai_eval';
 const USERS_COLLECTION = 'users';
 const EVALUATIONS_COLLECTION = 'evaluations';
+const RECOMMENDATIONS_COLLECTION = 'recommendations';
 const connectDatabase = async () => {
-    if (database) {
-        console.log('📦 Already connected to MongoDB');
-        return;
-    }
-    if (isConnecting) {
-        console.log('⏳ Connection in progress, waiting...');
-        // Wait for existing connection attempt
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        return;
-    }
-    isConnecting = true;
     try {
-        console.log('🔄 Connecting to MongoDB...');
-        console.log('URI prefix:', MONGO_URI.substring(0, 30) + '...');
-        mongoClient = new mongodb_1.MongoClient(MONGO_URI, {
-            serverSelectionTimeoutMS: 10000,
-            connectTimeoutMS: 10000,
-        });
+        mongoClient = new mongodb_1.MongoClient(MONGO_URI);
         await mongoClient.connect();
         database = mongoClient.db(DB_NAME);
         console.log(`✅ Connected to MongoDB: ${DB_NAME}`);
-        // Create indexes (don't fail if they exist)
-        try {
-            const usersCollection = database.collection(USERS_COLLECTION);
-            await usersCollection.createIndex({ username: 1 }, { unique: true });
-            await usersCollection.createIndex({ email: 1 }, { unique: true });
-            const evaluationsCollection = database.collection(EVALUATIONS_COLLECTION);
-            await evaluationsCollection.createIndex({ applicationId: 1 }, { unique: true });
-        }
-        catch (indexError) {
-            console.log('⚠️ Index creation skipped (may already exist)');
-        }
+        // Create indexes
+        const usersCollection = database.collection(USERS_COLLECTION);
+        await usersCollection.createIndex({ username: 1 }, { unique: true });
+        await usersCollection.createIndex({ email: 1 }, { unique: true });
+        // Create evaluations index
+        const evaluationsCollection = database.collection(EVALUATIONS_COLLECTION);
+        await evaluationsCollection.createIndex({ applicationId: 1 }, { unique: true });
+        // Recommendations indexes
+        const recommendationsCollection = database.collection(RECOMMENDATIONS_COLLECTION);
+        await recommendationsCollection.createIndex({ applicationId: 1, documentName: 1, version: 1 }, { unique: true });
+        await recommendationsCollection.createIndex({ applicationId: 1 });
     }
     catch (error) {
         console.error('❌ Failed to connect to MongoDB:', error);
-        mongoClient = null;
-        database = null;
         throw error;
-    }
-    finally {
-        isConnecting = false;
     }
 };
 exports.connectDatabase = connectDatabase;
 const disconnectDatabase = async () => {
     if (mongoClient) {
         await mongoClient.close();
-        mongoClient = null;
-        database = null;
         console.log('❌ Disconnected from MongoDB');
     }
 };
 exports.disconnectDatabase = disconnectDatabase;
-const getDatabase = () => {
-    if (!database) {
-        throw new Error('Database not connected. Call connectDatabase() first.');
-    }
-    return database;
-};
-exports.getDatabase = getDatabase;
 const getUsersCollection = () => {
-    return (0, exports.getDatabase)().collection(USERS_COLLECTION);
+    if (!database) {
+        throw new Error('Database not connected');
+    }
+    return database.collection(USERS_COLLECTION);
 };
 exports.getUsersCollection = getUsersCollection;
 const findUserByUsername = async (username) => {
-    try {
-        const collection = (0, exports.getUsersCollection)();
-        return await collection.findOne({ username });
-    }
-    catch (error) {
-        console.error('Error finding user by username:', error);
-        throw error;
-    }
+    const collection = (0, exports.getUsersCollection)();
+    return await collection.findOne({ username });
 };
 exports.findUserByUsername = findUserByUsername;
 const findUserByEmail = async (email) => {
@@ -104,43 +71,43 @@ const createUser = async (user) => {
 };
 exports.createUser = createUser;
 const seedDefaultUsers = async () => {
-    try {
-        const collection = (0, exports.getUsersCollection)();
-        const count = await collection.countDocuments();
-        if (count > 0) {
-            console.log(`📦 Found ${count} users in database, skipping seed`);
-            return;
+    const collection = (0, exports.getUsersCollection)();
+    const count = await collection.countDocuments();
+    if (count > 0) {
+        console.log('📦 Users already exist in database, skipping seed');
+        return;
+    }
+    const defaultUsers = [
+        {
+            username: 'admin@pvara.gov.pk',
+            email: 'admin@pvara.gov.pk',
+            password: 'pvara@ai',
+            name: 'System Administrator',
+            role: 'admin'
+        },
+        {
+            username: 'evaluator',
+            email: 'evaluator@pvara.gov.pk',
+            password: 'eval123',
+            name: 'PVARA Evaluator',
+            role: 'evaluator'
+        },
+        {
+            username: 'reviewer',
+            email: 'reviewer@pvara.gov.pk',
+            password: 'review123',
+            name: 'Compliance Reviewer',
+            role: 'reviewer'
+        },
+        {
+            username: 'demo',
+            email: 'demo@pvara.gov.pk',
+            password: 'demo',
+            name: 'Demo User',
+            role: 'evaluator'
         }
-        const defaultUsers = [
-            {
-                username: 'admin@pvara.gov.pk',
-                email: 'admin@pvara.gov.pk',
-                password: 'pvara@ai',
-                name: 'System Administrator',
-                role: 'admin'
-            },
-            {
-                username: 'evaluator',
-                email: 'evaluator@pvara.gov.pk',
-                password: 'eval123',
-                name: 'PVARA Evaluator',
-                role: 'evaluator'
-            },
-            {
-                username: 'reviewer',
-                email: 'reviewer@pvara.gov.pk',
-                password: 'review123',
-                name: 'Compliance Reviewer',
-                role: 'reviewer'
-            },
-            {
-                username: 'demo',
-                email: 'demo@pvara.gov.pk',
-                password: 'demo',
-                name: 'Demo User',
-                role: 'evaluator'
-            }
-        ];
+    ];
+    try {
         await collection.insertMany(defaultUsers.map(user => ({
             ...user,
             createdAt: new Date(),
@@ -149,20 +116,25 @@ const seedDefaultUsers = async () => {
         console.log(`✅ Seeded ${defaultUsers.length} default users`);
     }
     catch (error) {
-        if (error.code === 11000) {
-            console.log('⚠️ Users already exist, skipping seed');
-        }
-        else {
-            console.error('⚠️ Error seeding users:', error);
-        }
+        console.error('⚠️ Error seeding users (may already exist):', error);
     }
 };
 exports.seedDefaultUsers = seedDefaultUsers;
 // Evaluations Collection Functions
 const getEvaluationsCollection = () => {
-    return (0, exports.getDatabase)().collection(EVALUATIONS_COLLECTION);
+    if (!database) {
+        throw new Error('Database not connected');
+    }
+    return database.collection(EVALUATIONS_COLLECTION);
 };
 exports.getEvaluationsCollection = getEvaluationsCollection;
+const getRecommendationsCollection = () => {
+    if (!database) {
+        throw new Error('Database not connected');
+    }
+    return database.collection(RECOMMENDATIONS_COLLECTION);
+};
+exports.getRecommendationsCollection = getRecommendationsCollection;
 const saveEvaluation = async (applicationId, evaluation) => {
     const collection = (0, exports.getEvaluationsCollection)();
     await collection.updateOne({ applicationId }, {
@@ -189,10 +161,47 @@ const getAllEvaluations = async () => {
     return await collection.find({}).toArray();
 };
 exports.getAllEvaluations = getAllEvaluations;
+// Recommendation trail functions
+const saveRecommendationsVersion = async (applicationId, documentName, version, recommendations, originalExtract) => {
+    const collection = (0, exports.getRecommendationsCollection)();
+    await collection.updateOne({ applicationId, documentName, version }, {
+        $set: {
+            applicationId,
+            documentName,
+            version,
+            recommendations,
+            originalExtract,
+            updatedAt: new Date()
+        },
+        $setOnInsert: {
+            createdAt: new Date()
+        }
+    }, { upsert: true });
+};
+exports.saveRecommendationsVersion = saveRecommendationsVersion;
+const getRecommendationsTrail = async (applicationId, documentName) => {
+    const collection = (0, exports.getRecommendationsCollection)();
+    const query = { applicationId };
+    if (documentName)
+        query.documentName = documentName;
+    return await collection.find(query).sort({ version: 1 }).toArray();
+};
+exports.getRecommendationsTrail = getRecommendationsTrail;
+const updateRecommendationStatus = async (applicationId, documentName, version, ids, status) => {
+    const collection = (0, exports.getRecommendationsCollection)();
+    await collection.updateOne({ applicationId, documentName, version }, {
+        $set: {
+            'recommendations.$[r].status': status,
+            'recommendations.$[r].updatedAt': new Date()
+        }
+    }, {
+        arrayFilters: [{ 'r.id': { $in: ids } }]
+    });
+};
+exports.updateRecommendationStatus = updateRecommendationStatus;
 exports.default = {
     connectDatabase: exports.connectDatabase,
     disconnectDatabase: exports.disconnectDatabase,
-    getDatabase: exports.getDatabase,
     getUsersCollection: exports.getUsersCollection,
     findUserByUsername: exports.findUserByUsername,
     findUserByEmail: exports.findUserByEmail,
@@ -201,6 +210,10 @@ exports.default = {
     getEvaluationsCollection: exports.getEvaluationsCollection,
     saveEvaluation: exports.saveEvaluation,
     getEvaluation: exports.getEvaluation,
-    getAllEvaluations: exports.getAllEvaluations
+    getAllEvaluations: exports.getAllEvaluations,
+    getRecommendationsCollection: exports.getRecommendationsCollection,
+    saveRecommendationsVersion: exports.saveRecommendationsVersion,
+    getRecommendationsTrail: exports.getRecommendationsTrail,
+    updateRecommendationStatus: exports.updateRecommendationStatus
 };
 //# sourceMappingURL=database.service.js.map

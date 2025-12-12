@@ -12,6 +12,7 @@ const database_service_1 = require("./services/database.service");
 const evaluation_routes_1 = __importDefault(require("./routes/evaluation.routes"));
 const applications_routes_1 = __importDefault(require("./routes/applications.routes"));
 const auth_routes_1 = __importDefault(require("./routes/auth.routes"));
+const storage_routes_1 = __importDefault(require("./routes/storage.routes"));
 const app = (0, express_1.default)();
 // Middleware
 app.use((0, cors_1.default)({
@@ -62,6 +63,7 @@ app.use(auth_middleware_1.apiKeyMiddleware);
 // Routes
 app.use('/api/evaluation', evaluation_routes_1.default);
 app.use('/api/applications', applications_routes_1.default);
+app.use('/api/storage', storage_routes_1.default);
 // Error handling
 app.use(auth_middleware_1.errorHandler);
 // Start server
