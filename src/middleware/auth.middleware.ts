@@ -9,9 +9,15 @@ export const apiKeyMiddleware = (_req: Request, res: Response, next: NextFunctio
     return;
   }
 
+  // If no API_KEY is set in environment, allow all requests
+  const validKey = process.env.API_KEY;
+  if (!validKey) {
+    next();
+    return;
+  }
+
   // Ring-fenced: Validate API key for all requests in production
   const apiKey = _req.headers['x-api-key'] as string;
-  const validKey = process.env.API_KEY || 'dev-key-12345';
 
   if (!apiKey || apiKey !== validKey) {
     res.status(401).json({ error: 'Unauthorized: Invalid API key' });
