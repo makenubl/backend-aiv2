@@ -1,13 +1,11 @@
-import app from '../src/server';
+import app from '../src/app';
 import { connectDatabase, seedDefaultUsers } from '../src/services/database.service';
 
 // Initialize database connection (only once per cold start)
 let isInitialized = false;
-let initError: Error | null = null;
 
 const initializeDatabase = async () => {
   if (isInitialized) return;
-  if (initError) throw initError;
   
   try {
     console.log('🔄 Initializing database connection...');
@@ -18,8 +16,7 @@ const initializeDatabase = async () => {
     console.log('✅ Database initialized for serverless function');
   } catch (error) {
     console.error('❌ Failed to initialize database:', error);
-    initError = error as Error;
-    throw error;
+    // Don't throw - let the app handle errors gracefully
   }
 };
 
