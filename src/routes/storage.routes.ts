@@ -64,27 +64,10 @@ router.post('/folders', async (req, res) => {
     return res.status(400).json({ error: 'Folder name can only contain letters, numbers, hyphens, underscores, and spaces' });
   }
 
-  const { full, safeName } = resolveFolder(name);
-  if (fs.existsSync(full)) {
-    return res.status(409).json({ error: 'Folder already exists', folder: safeName });
-  }
+  const { safeName } = resolveFolder(name);
 
-  // Create folder and subdirectories
-  fs.mkdirSync(full, { recursive: true });
-  const docsDir = path.join(full, 'documents');
-  fs.mkdirSync(docsDir, { recursive: true });
-
-  // Initialize minimal application.json
-  const appJson = {
-    id: safeName,
-    companyName: '',
-    submittedBy: '',
-    submitterEmail: '',
-    applicationDate: new Date().toISOString(),
-    documents: [] as string[],
-  };
-  fs.writeFileSync(path.join(full, 'application.json'), JSON.stringify(appJson, null, 2));
-
+  // No filesystem write on Vercel (read-only)
+  // Track folder metadata in MongoDB
   if (ownerEmail) {
     await upsertAccessGrant(safeName, ownerEmail, 'admin', ['view', 'edit', 'delete'], ownerEmail);
   }
@@ -92,7 +75,6 @@ router.post('/folders', async (req, res) => {
   return res.status(201).json({
     message: 'Folder created',
     folder: safeName,
-    path: full,
   });
 });
 
