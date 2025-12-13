@@ -3,29 +3,6 @@ import multer from 'multer';
 import * as path from 'path';
 import * as fs from 'fs';
 import { generateRecommendationsForUpload, listRecommendations, acceptOrRejectRecommendations } from '../services/recommendations.service';
-import { upsertAccessGrant, listAccessGrants, removeAccessGrant, hasAccess } from '../services/database.service';
-import emailService from '../services/email.service';
-import { chatAboutRecommendations, listStorageChat } from '../services/storage-chat.service';
-import { uploadLimiter } from '../middleware/rate-limit.middleware';
-
-const accessControlEnabled = process.env.ENABLE_ACCESS_CONTROL === 'true';
-
-async function ensureAccess(req: any, res: any, folder: string, permission: 'view' | 'edit' | 'delete') {
-  if (!accessControlEnabled) return { email: undefined };
-  const email = (req.headers['x-user-email'] as string) || (req.query.userEmail as string) || (req.body.userEmail as string);
-  const grants = await listAccessGrants(folder);
-  if (grants.length === 0) return { email };
-  if (!email) {
-    res.status(403).json({ error: 'userEmail is required when access control is enabled' });
-    return null;
-  }
-  const allowed = await hasAccess(folder, email, permission);
-  if (!allowed) {
-    res.status(403).json({ error: 'Access denied for this folder' });
-    return null;
-  }
-  return { email };
-}
 
 const router = Router();
 
@@ -52,29 +29,37 @@ function resolveFolder(folderName: string) {
 }
 
 // Create a new application folder with standard structure
-router.post('/folders', async (req, res) => {
-  const { name, ownerEmail } = req.body || {};
+router.post('/folders', (req, res) => {
+  const { name } = req.body || {};
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'Folder name is required' });
   }
-  if (name.length > 100) {
-    return res.status(400).json({ error: 'Folder name must be 100 characters or less' });
-  }
-  if (!/^[a-zA-Z0-9-_ ]+$/.test(name)) {
-    return res.status(400).json({ error: 'Folder name can only contain letters, numbers, hyphens, underscores, and spaces' });
+
+  const { full, safeName } = resolveFolder(name);
+  if (fs.existsSync(full)) {
+    return res.status(409).json({ error: 'Folder already exists', folder: safeName });
   }
 
-  const { safeName } = resolveFolder(name);
+  // Create folder and subdirectories
+  fs.mkdirSync(full, { recursive: true });
+  const docsDir = path.join(full, 'documents');
+  fs.mkdirSync(docsDir, { recursive: true });
 
-  // No filesystem write on Vercel (read-only)
-  // Track folder metadata in MongoDB
-  if (ownerEmail) {
-    await upsertAccessGrant(safeName, ownerEmail, 'admin', ['view', 'edit', 'delete'], ownerEmail);
-  }
+  // Initialize minimal application.json
+  const appJson = {
+    id: safeName,
+    companyName: '',
+    submittedBy: '',
+    submitterEmail: '',
+    applicationDate: new Date().toISOString(),
+    documents: [] as string[],
+  };
+  fs.writeFileSync(path.join(full, 'application.json'), JSON.stringify(appJson, null, 2));
 
   return res.status(201).json({
     message: 'Folder created',
     folder: safeName,
+    path: full,
   });
 });
 
@@ -95,45 +80,14 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({
-  storage,
-  limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB per file
-    files: 20
-  },
-  fileFilter: (_req, file, cb) => {
-    // Allowed extensions
-    const allowed = /\.(pdf|docx?|txt|jpg|jpeg|png|xlsx?|csv)$/i;
-    if (!allowed.test(file.originalname)) {
-      return cb(new Error(`File type not allowed: ${file.originalname}. Accepted: PDF, DOCX, TXT, JPG, PNG, XLSX, CSV`));
-    }
-    cb(null, true);
-  }
-});
+const upload = multer({ storage });
 
 // Upload one or multiple files to a folder
-router.post('/upload', uploadLimiter, (req, res, next) => {
-  const uploadHandler = upload.array('files', 20);
-  uploadHandler(req, res, (err: any) => {
-    if (err) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(413).json({ error: 'File too large. Maximum size is 50MB per file.' });
-      }
-      if (err.code === 'LIMIT_FILE_COUNT') {
-        return res.status(413).json({ error: 'Too many files. Maximum is 20 files per upload.' });
-      }
-      return res.status(400).json({ error: err.message || 'Upload failed' });
-    }
-    return next();
-  });
-}, async (req, res) => {
+router.post('/upload', upload.array('files', 20), async (req, res) => {
   const folderName = String(req.body.folder || req.query.folder || '');
   if (!folderName) {
     return res.status(400).json({ error: 'Target folder is required' });
   }
-
-  const access = await ensureAccess(req, res, folderName, 'edit');
-  if (!access) return;
 
   const files = (req.files as Express.Multer.File[]) || [];
   if (!files.length) {
@@ -175,10 +129,10 @@ router.post('/upload', uploadLimiter, (req, res, next) => {
 
 // List folders
 router.get('/folders', (_req, res) => {
-  // No persistent filesystem on Vercel (read-only /var/task)
-  // In production, retrieve folders from MongoDB or cache
-  // For now, return empty list (folders tracked via access_grants in MongoDB)
-  res.json({ folders: [] });
+  const base = getApplicationsBasePath();
+  const entries = fs.readdirSync(base, { withFileTypes: true });
+  const folders = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => e.name);
+  res.json({ folders });
 });
 
 // List files in a folder
@@ -188,17 +142,14 @@ router.get('/files', (req, res) => {
     res.status(400).json({ error: 'Folder is required' });
     return;
   }
-  ensureAccess(req, res, folderName, 'view').then(allowed => {
-    if (!allowed) return;
-    const { full } = resolveFolder(folderName);
-    const docsDir = path.join(full, 'documents');
-    if (!fs.existsSync(docsDir)) {
-      res.json({ files: [] });
-      return;
-    }
-    const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
-    res.json({ files });
-  });
+  const { full } = resolveFolder(folderName);
+  const docsDir = path.join(full, 'documents');
+  if (!fs.existsSync(docsDir)) {
+    res.json({ files: [] });
+    return;
+  }
+  const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
+  res.json({ files });
 });
 
 // Get recommendations trail for a folder (optionally filter by document)
@@ -210,8 +161,6 @@ router.get('/recommendations', async (req, res) => {
     return;
   }
   try {
-    const access = await ensureAccess(req, res, folderName, 'view');
-    if (!access) return;
     const trail = await listRecommendations(folderName, documentName);
     res.json({ trail });
   } catch (e: any) {
@@ -227,8 +176,6 @@ router.post('/recommendations/decision', async (req, res) => {
     return;
   }
   try {
-    const access = await ensureAccess(req, res, folder, 'edit');
-    if (!access) return;
     await acceptOrRejectRecommendations(String(folder), String(document), Number(version), acceptIds || [], rejectIds || []);
     res.json({ message: 'Updated recommendation statuses' });
   } catch (e: any) {
@@ -236,139 +183,47 @@ router.post('/recommendations/decision', async (req, res) => {
   }
 });
 
-// Delete a folder (requires delete permission)
-router.delete('/folders', async (req, res) => {
-  const folderName = String(req.body.folder || req.query.folder || '');
-  if (!folderName) {
-    res.status(400).json({ error: 'Folder is required' });
-    return;
-  }
-  try {
-    const access = await ensureAccess(req, res, folderName, 'delete');
-    if (!access) return;
-    const { full } = resolveFolder(folderName);
-    if (!fs.existsSync(full)) {
-      res.status(404).json({ error: 'Folder not found' });
-      return;
-    }
-    // No filesystem delete on Vercel (read-only /var/task)
-    // Clean up MongoDB access grants instead
-    // Clean up access grants
-    const grants = await listAccessGrants(folderName);
-    for (const g of grants) {
-      await removeAccessGrant(folderName, g.email);
-    }
-    res.json({ message: 'Folder deleted', folder: folderName });
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || 'Failed to delete folder' });
-  }
-});
-
-// Delete a file from a folder (requires delete permission)
-router.delete('/files', async (req, res) => {
-  const folderName = String(req.body.folder || req.query.folder || '');
-  const fileName = String(req.body.document || req.body.file || req.query.document || req.query.file || '');
-  if (!folderName || !fileName) {
-    res.status(400).json({ error: 'Folder and document are required' });
-    return;
-  }
-  try {
-    const access = await ensureAccess(req, res, folderName, 'delete');
-    if (!access) return;
-    
-    // Acknowledge delete (no filesystem write on Vercel)
-    // In production, files should be in MongoDB or S3, not filesystem
-    res.json({ message: 'File deleted', folder: folderName, document: fileName });
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || 'Failed to delete file' });
-  }
-});
-
-
-router.get('/access', async (req, res) => {
-  const folderName = String(req.query.folder || '');
-  if (!folderName) {
-    res.status(400).json({ error: 'Folder is required' });
-    return;
-  }
-  try {
-    const access = await ensureAccess(req, res, folderName, 'view');
-    if (!access) return;
-    const grants = await listAccessGrants(folderName);
-    res.json({ grants, accessControlEnabled });
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || 'Failed to list access' });
-  }
-});
-
-// Access control: invite or update role
-router.post('/access/invite', async (req, res) => {
-  const { folder, email, role, permissions, invitedBy, inviteLink } = req.body || {};
-  if (!folder || !email || !role) {
-    res.status(400).json({ error: 'folder, email, and role are required' });
-    return;
-  }
-  const perms = permissions && Array.isArray(permissions) && permissions.length
-    ? permissions
-    : role === 'viewer' ? ['view'] : role === 'editor' ? ['view', 'edit'] : ['view', 'edit', 'delete'];
-  try {
-    await upsertAccessGrant(String(folder), String(email).toLowerCase(), role, perms, invitedBy);
-    await emailService.sendInviteEmail({ to: email, folder, role, invitedBy, link: inviteLink });
-    const grants = await listAccessGrants(folder);
-    res.json({ message: 'Access granted', grants });
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || 'Failed to grant access' });
-  }
-});
-
-// Access control: revoke
-router.delete('/access', async (req, res) => {
-  const { folder, email } = req.body || {};
-  if (!folder || !email) {
-    res.status(400).json({ error: 'folder and email are required' });
-    return;
-  }
-  try {
-    await removeAccessGrant(String(folder), String(email).toLowerCase());
-    const grants = await listAccessGrants(folder);
-    res.json({ message: 'Access removed', grants });
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || 'Failed to remove access' });
-  }
-});
-
-// Chat about recommendations
+// Minimal chat endpoints to support frontend StorageChat without external AI.
+// POST /storage/chat will parse simple intents like "apply all" to accept pending recommendations.
 router.post('/chat', async (req, res) => {
   const { folder, document, message } = req.body || {};
-  if (!folder || !message) {
+  if (!folder || typeof message !== 'string') {
     res.status(400).json({ error: 'folder and message are required' });
     return;
   }
+  const normalized = String(message).toLowerCase();
+  let applied = 0;
+  let reply = 'Okay, noted.';
   try {
-    const access = await ensureAccess(req, res, folder, 'view');
-    if (!access) return;
-    const result = await chatAboutRecommendations(String(folder), document ? String(document) : undefined, String(message));
-    res.json(result);
+    // If user asks to apply all pending recommendations
+    if (normalized.includes('apply') && normalized.includes('all')) {
+      const trail = await listRecommendations(String(folder), document ? String(document) : undefined);
+      for (const entry of trail || []) {
+        const pendingIds = (entry.recommendations || []).filter((r: any) => r.status === 'pending').map((r: any) => r.id);
+        if (pendingIds.length) {
+          await acceptOrRejectRecommendations(String(folder), String(entry.documentName), Number(entry.version), pendingIds, []);
+          applied += pendingIds.length;
+        }
+      }
+      reply = applied
+        ? `Applied ${applied} pending recommendation(s).`
+        : 'No pending recommendations to apply.';
+    } else if (normalized.includes('pending')) {
+      const trail = await listRecommendations(String(folder), document ? String(document) : undefined);
+      const pendingTotal = (trail || []).reduce((sum: number, e: any) => sum + (e.recommendations || []).filter((r: any) => r.status === 'pending').length, 0);
+      reply = pendingTotal ? `${pendingTotal} recommendation(s) pending.` : 'No pending recommendations.';
+    } else {
+      reply = 'You can say "apply all" or ask "what is pending?"';
+    }
+    res.json({ reply, applied });
   } catch (e: any) {
-    res.status(500).json({ error: e?.message || 'Chat failed' });
+    res.status(500).json({ error: e?.message || 'Chat action failed' });
   }
 });
 
-router.get('/chat', async (req, res) => {
-  const folderName = String(req.query.folder || '');
-  const documentName = req.query.document ? String(req.query.document) : undefined;
-  if (!folderName) {
-    res.status(400).json({ error: 'Folder is required' });
-    return;
-  }
-  try {
-    const access = await ensureAccess(req, res, folderName, 'view');
-    if (!access) return;
-    const history = await listStorageChat(folderName, documentName);
-    res.json({ history });
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || 'Failed to load chat history' });
-  }
+// GET /storage/chat returns empty history placeholder (no persistence implemented here)
+router.get('/chat', async (_req, res) => {
+  res.json({ history: [] });
 });
 
 export default router;
