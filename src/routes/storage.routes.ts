@@ -175,10 +175,10 @@ router.post('/upload', uploadLimiter, (req, res, next) => {
 
 // List folders
 router.get('/folders', (_req, res) => {
-  const base = getApplicationsBasePath();
-  const entries = fs.readdirSync(base, { withFileTypes: true });
-  const folders = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => e.name);
-  res.json({ folders });
+  // No persistent filesystem on Vercel (read-only /var/task)
+  // In production, retrieve folders from MongoDB or cache
+  // For now, return empty list (folders tracked via access_grants in MongoDB)
+  res.json({ folders: [] });
 });
 
 // List files in a folder
