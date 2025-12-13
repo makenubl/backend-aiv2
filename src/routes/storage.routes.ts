@@ -3,6 +3,7 @@ import multer from 'multer';
 import * as path from 'path';
 import * as fs from 'fs';
 import { generateRecommendationsForUpload, listRecommendations, acceptOrRejectRecommendations } from '../services/recommendations.service';
+import { appendActivity, readActivities } from '../services/activity-log.service';
 
 const router = Router();
 
@@ -55,6 +56,15 @@ router.post('/folders', (req, res) => {
     documents: [] as string[],
   };
   fs.writeFileSync(path.join(full, 'application.json'), JSON.stringify(appJson, null, 2));
+
+  appendActivity(getApplicationsBasePath(), {
+    id: `create-${safeName}-${Date.now()}`,
+    userEmail: String(req.header('x-user-email') || ''),
+    userRole: String(req.header('x-user-role') || ''),
+    action: 'create-folder',
+    folder: safeName,
+    timestamp: new Date().toISOString(),
+  });
 
   return res.status(201).json({
     message: 'Folder created',
@@ -119,6 +129,15 @@ router.post('/upload', upload.array('files', 20), async (req, res) => {
       // continue even if one fails
     }
   }
+  appendActivity(getApplicationsBasePath(), {
+    id: `upload-${folderName}-${Date.now()}`,
+    userEmail: String(req.header('x-user-email') || ''),
+    userRole: String(req.header('x-user-role') || ''),
+    action: 'upload-files',
+    folder: folderName,
+    meta: { files: files.map(f => f.filename) },
+    timestamp: new Date().toISOString(),
+  });
   return res.status(200).json({
     message: 'Files uploaded',
     folder: folderName,
@@ -171,12 +190,29 @@ router.get('/recommendations', async (req, res) => {
 // Accept or reject recommendations by IDs on a specific version
 router.post('/recommendations/decision', async (req, res) => {
   const { folder, document, version, acceptIds, rejectIds } = req.body || {};
+  const userRole = String(req.header('x-user-role') || '');
+  // Simple role enforcement: only owner/editor can modify recommendations
+  if (!userRole || !['owner', 'editor'].includes(userRole)) {
+    res.status(403).json({ error: 'Insufficient role to modify recommendations' });
+    return;
+  }
   if (!folder || !document || typeof version !== 'number') {
     res.status(400).json({ error: 'folder, document, and numeric version are required' });
     return;
   }
   try {
     await acceptOrRejectRecommendations(String(folder), String(document), Number(version), acceptIds || [], rejectIds || []);
+    appendActivity(getApplicationsBasePath(), {
+      id: `decide-${folder}-${document}-${version}-${Date.now()}`,
+      userEmail: String(req.header('x-user-email') || ''),
+      userRole,
+      action: 'recommendations-decision',
+      folder: String(folder),
+      document: String(document),
+      version: Number(version),
+      meta: { acceptIds: acceptIds || [], rejectIds: rejectIds || [] },
+      timestamp: new Date().toISOString(),
+    });
     res.json({ message: 'Updated recommendation statuses' });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || 'Failed to update recommendation statuses' });
@@ -187,6 +223,11 @@ router.post('/recommendations/decision', async (req, res) => {
 // POST /storage/chat will parse simple intents like "apply all" to accept pending recommendations.
 router.post('/chat', async (req, res) => {
   const { folder, document, message } = req.body || {};
+  const userRole = String(req.header('x-user-role') || '');
+  if (!userRole || !['owner', 'editor'].includes(userRole)) {
+    res.status(403).json({ error: 'Insufficient role to perform chat actions' });
+    return;
+  }
   if (!folder || typeof message !== 'string') {
     res.status(400).json({ error: 'folder and message are required' });
     return;
@@ -215,6 +256,16 @@ router.post('/chat', async (req, res) => {
     } else {
       reply = 'You can say "apply all" or ask "what is pending?"';
     }
+    appendActivity(getApplicationsBasePath(), {
+      id: `chat-${folder}-${Date.now()}`,
+      userEmail: String(req.header('x-user-email') || ''),
+      userRole,
+      action: 'chat',
+      folder: String(folder),
+      document: document ? String(document) : undefined,
+      meta: { message, applied },
+      timestamp: new Date().toISOString(),
+    });
     res.json({ reply, applied });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || 'Chat action failed' });
@@ -224,6 +275,15 @@ router.post('/chat', async (req, res) => {
 // GET /storage/chat returns empty history placeholder (no persistence implemented here)
 router.get('/chat', async (_req, res) => {
   res.json({ history: [] });
+});
+
+// Activity log endpoint for UI visibility
+router.get('/activity', (req, res) => {
+  const folderName = String(req.query.folder || '');
+  const base = getApplicationsBasePath();
+  const all = readActivities(base);
+  const filtered = folderName ? all.filter(a => a.folder === folderName) : all;
+  res.json({ activities: filtered });
 });
 
 export default router;
