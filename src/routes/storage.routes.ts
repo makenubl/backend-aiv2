@@ -73,6 +73,36 @@ router.post('/folders', (req, res) => {
   });
 });
 
+// Delete a folder
+router.delete('/folders', (req, res) => {
+  const { folder } = req.body || {};
+  if (!folder || typeof folder !== 'string') {
+    return res.status(400).json({ error: 'Folder name is required' });
+  }
+
+  const { full, safeName } = resolveFolder(folder);
+  if (!fs.existsSync(full)) {
+    return res.status(404).json({ error: 'Folder not found' });
+  }
+
+  // Recursively delete folder
+  fs.rmSync(full, { recursive: true, force: true });
+
+  appendActivity(getApplicationsBasePath(), {
+    id: `delete-${safeName}-${Date.now()}`,
+    userEmail: String(req.header('x-user-email') || ''),
+    userRole: String(req.header('x-user-role') || ''),
+    action: 'delete-folder',
+    folder: safeName,
+    timestamp: new Date().toISOString(),
+  });
+
+  return res.status(200).json({
+    message: 'Folder deleted',
+    folder: safeName
+  });
+});
+
 // Multer storage configured to place files under the specified folder's documents directory
 const storage = multer.diskStorage({
   destination: (req, _file, cb) => {
