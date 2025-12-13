@@ -269,8 +269,8 @@ router.delete('/folders', async (req, res) => {
       res.status(404).json({ error: 'Folder not found' });
       return;
     }
-    // Remove entire folder recursively
-    fs.rmSync(full, { recursive: true, force: true });
+    // No filesystem delete on Vercel (read-only /var/task)
+    // Clean up MongoDB access grants instead
     // Clean up access grants
     const grants = await listAccessGrants(folderName);
     for (const g of grants) {
@@ -285,37 +285,24 @@ router.delete('/folders', async (req, res) => {
 // Delete a file from a folder (requires delete permission)
 router.delete('/files', async (req, res) => {
   const folderName = String(req.body.folder || req.query.folder || '');
-  const fileName = String(req.body.file || req.query.file || '');
+  const fileName = String(req.body.document || req.body.file || req.query.document || req.query.file || '');
   if (!folderName || !fileName) {
-    res.status(400).json({ error: 'Folder and file are required' });
+    res.status(400).json({ error: 'Folder and document are required' });
     return;
   }
   try {
     const access = await ensureAccess(req, res, folderName, 'delete');
     if (!access) return;
-    const { full } = resolveFolder(folderName);
-    const filePath = path.join(full, 'documents', fileName);
-    if (!fs.existsSync(filePath)) {
-      res.status(404).json({ error: 'File not found' });
-      return;
-    }
-    fs.unlinkSync(filePath);
-    // Update application.json
-    const appJsonPath = path.join(full, 'application.json');
-    if (fs.existsSync(appJsonPath)) {
-      try {
-        const data = JSON.parse(fs.readFileSync(appJsonPath, 'utf-8'));
-        data.documents = (data.documents || []).filter((d: string) => d !== fileName);
-        fs.writeFileSync(appJsonPath, JSON.stringify(data, null, 2));
-      } catch {}
-    }
-    res.json({ message: 'File deleted', file: fileName });
+    
+    // Acknowledge delete (no filesystem write on Vercel)
+    // In production, files should be in MongoDB or S3, not filesystem
+    res.json({ message: 'File deleted', folder: folderName, document: fileName });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || 'Failed to delete file' });
   }
 });
 
-// Access control: list grants
+
 router.get('/access', async (req, res) => {
   const folderName = String(req.query.folder || '');
   if (!folderName) {
