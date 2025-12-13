@@ -3,6 +3,29 @@ import multer from 'multer';
 import * as path from 'path';
 import * as fs from 'fs';
 import { generateRecommendationsForUpload, listRecommendations, acceptOrRejectRecommendations } from '../services/recommendations.service';
+import { upsertAccessGrant, listAccessGrants, removeAccessGrant, hasAccess } from '../services/database.service';
+import emailService from '../services/email.service';
+import { chatAboutRecommendations, listStorageChat } from '../services/storage-chat.service';
+import { uploadLimiter } from '../middleware/rate-limit.middleware';
+
+const accessControlEnabled = process.env.ENABLE_ACCESS_CONTROL === 'true';
+
+async function ensureAccess(req: any, res: any, folder: string, permission: 'view' | 'edit' | 'delete') {
+  if (!accessControlEnabled) return { email: undefined };
+  const email = (req.headers['x-user-email'] as string) || (req.query.userEmail as string) || (req.body.userEmail as string);
+  const grants = await listAccessGrants(folder);
+  if (grants.length === 0) return { email };
+  if (!email) {
+    res.status(403).json({ error: 'userEmail is required when access control is enabled' });
+    return null;
+  }
+  const allowed = await hasAccess(folder, email, permission);
+  if (!allowed) {
+    res.status(403).json({ error: 'Access denied for this folder' });
+    return null;
+  }
+  return { email };
+}
 
 const router = Router();
 
@@ -29,10 +52,16 @@ function resolveFolder(folderName: string) {
 }
 
 // Create a new application folder with standard structure
-router.post('/folders', (req, res) => {
-  const { name } = req.body || {};
+router.post('/folders', async (req, res) => {
+  const { name, ownerEmail } = req.body || {};
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'Folder name is required' });
+  }
+  if (name.length > 100) {
+    return res.status(400).json({ error: 'Folder name must be 100 characters or less' });
+  }
+  if (!/^[a-zA-Z0-9-_ ]+$/.test(name)) {
+    return res.status(400).json({ error: 'Folder name can only contain letters, numbers, hyphens, underscores, and spaces' });
   }
 
   const { full, safeName } = resolveFolder(name);
@@ -55,6 +84,10 @@ router.post('/folders', (req, res) => {
     documents: [] as string[],
   };
   fs.writeFileSync(path.join(full, 'application.json'), JSON.stringify(appJson, null, 2));
+
+  if (ownerEmail) {
+    await upsertAccessGrant(safeName, ownerEmail, 'admin', ['view', 'edit', 'delete'], ownerEmail);
+  }
 
   return res.status(201).json({
     message: 'Folder created',
@@ -80,14 +113,45 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB per file
+    files: 20
+  },
+  fileFilter: (_req, file, cb) => {
+    // Allowed extensions
+    const allowed = /\.(pdf|docx?|txt|jpg|jpeg|png|xlsx?|csv)$/i;
+    if (!allowed.test(file.originalname)) {
+      return cb(new Error(`File type not allowed: ${file.originalname}. Accepted: PDF, DOCX, TXT, JPG, PNG, XLSX, CSV`));
+    }
+    cb(null, true);
+  }
+});
 
 // Upload one or multiple files to a folder
-router.post('/upload', upload.array('files', 20), async (req, res) => {
+router.post('/upload', uploadLimiter, (req, res, next) => {
+  const uploadHandler = upload.array('files', 20);
+  uploadHandler(req, res, (err: any) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'File too large. Maximum size is 50MB per file.' });
+      }
+      if (err.code === 'LIMIT_FILE_COUNT') {
+        return res.status(413).json({ error: 'Too many files. Maximum is 20 files per upload.' });
+      }
+      return res.status(400).json({ error: err.message || 'Upload failed' });
+    }
+    return next();
+  });
+}, async (req, res) => {
   const folderName = String(req.body.folder || req.query.folder || '');
   if (!folderName) {
     return res.status(400).json({ error: 'Target folder is required' });
   }
+
+  const access = await ensureAccess(req, res, folderName, 'edit');
+  if (!access) return;
 
   const files = (req.files as Express.Multer.File[]) || [];
   if (!files.length) {
@@ -142,14 +206,17 @@ router.get('/files', (req, res) => {
     res.status(400).json({ error: 'Folder is required' });
     return;
   }
-  const { full } = resolveFolder(folderName);
-  const docsDir = path.join(full, 'documents');
-  if (!fs.existsSync(docsDir)) {
-    res.json({ files: [] });
-    return;
-  }
-  const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
-  res.json({ files });
+  ensureAccess(req, res, folderName, 'view').then(allowed => {
+    if (!allowed) return;
+    const { full } = resolveFolder(folderName);
+    const docsDir = path.join(full, 'documents');
+    if (!fs.existsSync(docsDir)) {
+      res.json({ files: [] });
+      return;
+    }
+    const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
+    res.json({ files });
+  });
 });
 
 // Get recommendations trail for a folder (optionally filter by document)
@@ -161,6 +228,8 @@ router.get('/recommendations', async (req, res) => {
     return;
   }
   try {
+    const access = await ensureAccess(req, res, folderName, 'view');
+    if (!access) return;
     const trail = await listRecommendations(folderName, documentName);
     res.json({ trail });
   } catch (e: any) {
@@ -176,10 +245,160 @@ router.post('/recommendations/decision', async (req, res) => {
     return;
   }
   try {
+    const access = await ensureAccess(req, res, folder, 'edit');
+    if (!access) return;
     await acceptOrRejectRecommendations(String(folder), String(document), Number(version), acceptIds || [], rejectIds || []);
     res.json({ message: 'Updated recommendation statuses' });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || 'Failed to update recommendation statuses' });
+  }
+});
+
+// Delete a folder (requires delete permission)
+router.delete('/folders', async (req, res) => {
+  const folderName = String(req.body.folder || req.query.folder || '');
+  if (!folderName) {
+    res.status(400).json({ error: 'Folder is required' });
+    return;
+  }
+  try {
+    const access = await ensureAccess(req, res, folderName, 'delete');
+    if (!access) return;
+    const { full } = resolveFolder(folderName);
+    if (!fs.existsSync(full)) {
+      res.status(404).json({ error: 'Folder not found' });
+      return;
+    }
+    // Remove entire folder recursively
+    fs.rmSync(full, { recursive: true, force: true });
+    // Clean up access grants
+    const grants = await listAccessGrants(folderName);
+    for (const g of grants) {
+      await removeAccessGrant(folderName, g.email);
+    }
+    res.json({ message: 'Folder deleted', folder: folderName });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to delete folder' });
+  }
+});
+
+// Delete a file from a folder (requires delete permission)
+router.delete('/files', async (req, res) => {
+  const folderName = String(req.body.folder || req.query.folder || '');
+  const fileName = String(req.body.file || req.query.file || '');
+  if (!folderName || !fileName) {
+    res.status(400).json({ error: 'Folder and file are required' });
+    return;
+  }
+  try {
+    const access = await ensureAccess(req, res, folderName, 'delete');
+    if (!access) return;
+    const { full } = resolveFolder(folderName);
+    const filePath = path.join(full, 'documents', fileName);
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+    fs.unlinkSync(filePath);
+    // Update application.json
+    const appJsonPath = path.join(full, 'application.json');
+    if (fs.existsSync(appJsonPath)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(appJsonPath, 'utf-8'));
+        data.documents = (data.documents || []).filter((d: string) => d !== fileName);
+        fs.writeFileSync(appJsonPath, JSON.stringify(data, null, 2));
+      } catch {}
+    }
+    res.json({ message: 'File deleted', file: fileName });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to delete file' });
+  }
+});
+
+// Access control: list grants
+router.get('/access', async (req, res) => {
+  const folderName = String(req.query.folder || '');
+  if (!folderName) {
+    res.status(400).json({ error: 'Folder is required' });
+    return;
+  }
+  try {
+    const access = await ensureAccess(req, res, folderName, 'view');
+    if (!access) return;
+    const grants = await listAccessGrants(folderName);
+    res.json({ grants, accessControlEnabled });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to list access' });
+  }
+});
+
+// Access control: invite or update role
+router.post('/access/invite', async (req, res) => {
+  const { folder, email, role, permissions, invitedBy, inviteLink } = req.body || {};
+  if (!folder || !email || !role) {
+    res.status(400).json({ error: 'folder, email, and role are required' });
+    return;
+  }
+  const perms = permissions && Array.isArray(permissions) && permissions.length
+    ? permissions
+    : role === 'viewer' ? ['view'] : role === 'editor' ? ['view', 'edit'] : ['view', 'edit', 'delete'];
+  try {
+    await upsertAccessGrant(String(folder), String(email).toLowerCase(), role, perms, invitedBy);
+    await emailService.sendInviteEmail({ to: email, folder, role, invitedBy, link: inviteLink });
+    const grants = await listAccessGrants(folder);
+    res.json({ message: 'Access granted', grants });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to grant access' });
+  }
+});
+
+// Access control: revoke
+router.delete('/access', async (req, res) => {
+  const { folder, email } = req.body || {};
+  if (!folder || !email) {
+    res.status(400).json({ error: 'folder and email are required' });
+    return;
+  }
+  try {
+    await removeAccessGrant(String(folder), String(email).toLowerCase());
+    const grants = await listAccessGrants(folder);
+    res.json({ message: 'Access removed', grants });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to remove access' });
+  }
+});
+
+// Chat about recommendations
+router.post('/chat', async (req, res) => {
+  const { folder, document, message } = req.body || {};
+  if (!folder || !message) {
+    res.status(400).json({ error: 'folder and message are required' });
+    return;
+  }
+  try {
+    const access = await ensureAccess(req, res, folder, 'view');
+    if (!access) return;
+    const result = await chatAboutRecommendations(String(folder), document ? String(document) : undefined, String(message));
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Chat failed' });
+  }
+});
+
+router.get('/chat', async (req, res) => {
+  const folderName = String(req.query.folder || '');
+  const documentName = req.query.document ? String(req.query.document) : undefined;
+  if (!folderName) {
+    res.status(400).json({ error: 'Folder is required' });
+    return;
+  }
+  try {
+    const access = await ensureAccess(req, res, folderName, 'view');
+    if (!access) return;
+    const history = await listStorageChat(folderName, documentName);
+    res.json({ history });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message || 'Failed to load chat history' });
   }
 });
 

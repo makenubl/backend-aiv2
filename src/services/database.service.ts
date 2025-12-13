@@ -30,6 +30,28 @@ interface RecommendationItem {
   updatedAt?: Date;
 }
 
+interface AccessGrant {
+  _id?: string;
+  applicationId: string;
+  email: string;
+  role: 'viewer' | 'editor' | 'admin';
+  permissions: Array<'view' | 'edit' | 'delete'>;
+  invitedBy?: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface ChatMessage {
+  _id?: string;
+  applicationId: string;
+  documentName?: string;
+  role: 'user' | 'assistant';
+  message: string;
+  recommendationIds?: string[];
+  actions?: Array<{ type: 'accept' | 'reject'; ids: string[] }>;
+  createdAt: Date;
+}
+
 interface DocumentRecommendationTrail {
   _id?: string;
   applicationId: string; // folder name
@@ -46,6 +68,8 @@ const DB_NAME = process.env.DB_NAME || 'pvara_ai_eval';
 const USERS_COLLECTION = 'users';
 const EVALUATIONS_COLLECTION = 'evaluations';
 const RECOMMENDATIONS_COLLECTION = 'recommendations';
+const ACCESS_COLLECTION = 'storage_access';
+const CHAT_COLLECTION = 'storage_chat';
 
 export const connectDatabase = async (): Promise<void> => {
   try {
@@ -67,6 +91,14 @@ export const connectDatabase = async (): Promise<void> => {
     const recommendationsCollection = database.collection(RECOMMENDATIONS_COLLECTION);
     await recommendationsCollection.createIndex({ applicationId: 1, documentName: 1, version: 1 }, { unique: true });
     await recommendationsCollection.createIndex({ applicationId: 1 });
+
+    // Access control indexes
+    const accessCollection = database.collection(ACCESS_COLLECTION);
+    await accessCollection.createIndex({ applicationId: 1, email: 1 }, { unique: true });
+
+    // Chat indexes
+    const chatCollection = database.collection(CHAT_COLLECTION);
+    await chatCollection.createIndex({ applicationId: 1, documentName: 1, createdAt: -1 });
   } catch (error) {
     console.error('❌ Failed to connect to MongoDB:', error);
     throw error;
@@ -180,6 +212,20 @@ export const getRecommendationsCollection = (): Collection<DocumentRecommendatio
   return database.collection(RECOMMENDATIONS_COLLECTION);
 };
 
+export const getAccessCollection = (): Collection<AccessGrant> => {
+  if (!database) {
+    throw new Error('Database not connected');
+  }
+  return database.collection(ACCESS_COLLECTION);
+};
+
+export const getChatCollection = (): Collection<ChatMessage> => {
+  if (!database) {
+    throw new Error('Database not connected');
+  }
+  return database.collection(CHAT_COLLECTION);
+};
+
 export const saveEvaluation = async (applicationId: string, evaluation: any): Promise<void> => {
   const collection = getEvaluationsCollection();
   await collection.updateOne(
@@ -270,6 +316,93 @@ export const updateRecommendationStatus = async (
   );
 };
 
+// Access control helpers
+export const upsertAccessGrant = async (
+  applicationId: string,
+  email: string,
+  role: AccessGrant['role'],
+  permissions: AccessGrant['permissions'],
+  invitedBy?: string
+): Promise<void> => {
+  const collection = getAccessCollection();
+  await collection.updateOne(
+    { applicationId, email },
+    {
+      $set: {
+        applicationId,
+        email,
+        role,
+        permissions,
+        invitedBy,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: {
+        createdAt: new Date(),
+      }
+    },
+    { upsert: true }
+  );
+};
+
+export const listAccessGrants = async (applicationId: string): Promise<AccessGrant[]> => {
+  const collection = getAccessCollection();
+  return collection.find({ applicationId }).sort({ createdAt: 1 }).toArray();
+};
+
+export const removeAccessGrant = async (applicationId: string, email: string): Promise<void> => {
+  const collection = getAccessCollection();
+  await collection.deleteOne({ applicationId, email });
+};
+
+export const hasAccess = async (
+  applicationId: string,
+  email: string | undefined,
+  required: 'view' | 'edit' | 'delete'
+): Promise<boolean> => {
+  const collection = getAccessCollection();
+  const record = await collection.findOne({ applicationId, email });
+  if (!record) return false;
+  if (record.role === 'admin') return true;
+  return record.permissions.includes(required);
+};
+
+// Chat helpers
+export const insertChatMessage = async (
+  applicationId: string,
+  documentName: string | undefined,
+  role: ChatMessage['role'],
+  message: string,
+  recommendationIds?: string[],
+  actions?: ChatMessage['actions']
+): Promise<void> => {
+  const collection = getChatCollection();
+  await collection.insertOne({
+    applicationId,
+    documentName,
+    role,
+    message,
+    recommendationIds,
+    actions,
+    createdAt: new Date()
+  } as ChatMessage);
+};
+
+export const listChatMessages = async (
+  applicationId: string,
+  documentName?: string,
+  limit = 20
+): Promise<ChatMessage[]> => {
+  const collection = getChatCollection();
+  const query: Record<string, any> = { applicationId };
+  if (documentName) query.documentName = documentName;
+  return collection
+    .find(query)
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .toArray()
+    .then(list => list.reverse());
+};
+
 export default {
   connectDatabase,
   disconnectDatabase,
@@ -286,4 +419,12 @@ export default {
   ,saveRecommendationsVersion
   ,getRecommendationsTrail
   ,updateRecommendationStatus
+  ,getAccessCollection
+  ,upsertAccessGrant
+  ,listAccessGrants
+  ,removeAccessGrant
+  ,hasAccess
+  ,getChatCollection
+  ,insertChatMessage
+  ,listChatMessages
 };
