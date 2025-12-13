@@ -1,21 +1,30 @@
-import app from '../src/app';
+import app from '../src/server';
 import { connectDatabase, seedDefaultUsers } from '../src/services/database.service';
 
+// Initialize database connection (only once per cold start)
 let isInitialized = false;
 
-export default async function handler(req: any, res: any) {
-  // Initialize database once
+const initializeDatabase = async () => {
   if (!isInitialized) {
     try {
       await connectDatabase();
       await seedDefaultUsers();
       isInitialized = true;
-      console.log('✅ Database initialized');
+      console.log('✅ Database initialized for serverless function');
     } catch (error) {
-      console.error('❌ Database init failed:', error);
+      console.error('Failed to initialize database:', error);
+      throw error;
     }
   }
-  
-  // Handle the request
-  return app(req, res);
-}
+};
+
+// Serverless function handler
+export default async (req: any, res: any) => {
+  try {
+    await initializeDatabase();
+    return app(req, res);
+  } catch (error) {
+    console.error('Serverless function error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};

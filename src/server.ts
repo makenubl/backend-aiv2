@@ -3,7 +3,6 @@ import 'express-async-errors';
 import cors from 'cors';
 import { config } from './config';
 import { apiKeyMiddleware, errorHandler } from './middleware/auth.middleware';
-import { apiLimiter, authLimiter } from './middleware/rate-limit.middleware';
 import { connectDatabase, seedDefaultUsers } from './services/database.service';
 import evaluationRoutes from './routes/evaluation.routes';
 import applicationsRoutes from './routes/applications.routes';
@@ -31,19 +30,18 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-api-key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-api-key', 'x-user-role', 'x-user-email'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
   maxAge: 600 // Cache preflight for 10 minutes
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// Auth routes with rate limiting
-app.use('/api/auth', authLimiter, authRoutes);
+// Auth routes (no API key required)
+app.use('/api/auth', authRoutes);
 
-// Ring-fenced: API key validation + rate limiting for other routes
+// Ring-fenced: API key validation for other routes
 app.use(apiKeyMiddleware);
-app.use('/api', apiLimiter);
 
 // Routes
 app.use('/api/evaluation', evaluationRoutes);

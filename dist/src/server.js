@@ -8,7 +8,6 @@ require("express-async-errors");
 const cors_1 = __importDefault(require("cors"));
 const config_1 = require("./config");
 const auth_middleware_1 = require("./middleware/auth.middleware");
-const rate_limit_middleware_1 = require("./middleware/rate-limit.middleware");
 const database_service_1 = require("./services/database.service");
 const evaluation_routes_1 = __importDefault(require("./routes/evaluation.routes"));
 const applications_routes_1 = __importDefault(require("./routes/applications.routes"));
@@ -33,17 +32,16 @@ app.use((0, cors_1.default)({
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-api-key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-api-key', 'x-user-role', 'x-user-email'],
     exposedHeaders: ['Content-Range', 'X-Content-Range'],
     maxAge: 600 // Cache preflight for 10 minutes
 }));
 app.use(express_1.default.json({ limit: '10mb' }));
 app.use(express_1.default.urlencoded({ limit: '10mb', extended: true }));
-// Auth routes with rate limiting
-app.use('/api/auth', rate_limit_middleware_1.authLimiter, auth_routes_1.default);
-// Ring-fenced: API key validation + rate limiting for other routes
+// Auth routes (no API key required)
+app.use('/api/auth', auth_routes_1.default);
+// Ring-fenced: API key validation for other routes
 app.use(auth_middleware_1.apiKeyMiddleware);
-app.use('/api', rate_limit_middleware_1.apiLimiter);
 // Routes
 app.use('/api/evaluation', evaluation_routes_1.default);
 app.use('/api/applications', applications_routes_1.default);

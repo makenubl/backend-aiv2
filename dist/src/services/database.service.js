@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.listChatMessages = exports.insertChatMessage = exports.hasAccess = exports.removeAccessGrant = exports.listAccessGrants = exports.upsertAccessGrant = exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.getEvaluation = exports.saveEvaluation = exports.getChatCollection = exports.getAccessCollection = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.connectDatabase = void 0;
+exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.getEvaluation = exports.saveEvaluation = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.connectDatabase = void 0;
 const mongodb_1 = require("mongodb");
 let mongoClient;
 let database;
@@ -9,8 +9,6 @@ const DB_NAME = process.env.DB_NAME || 'pvara_ai_eval';
 const USERS_COLLECTION = 'users';
 const EVALUATIONS_COLLECTION = 'evaluations';
 const RECOMMENDATIONS_COLLECTION = 'recommendations';
-const ACCESS_COLLECTION = 'storage_access';
-const CHAT_COLLECTION = 'storage_chat';
 const connectDatabase = async () => {
     try {
         mongoClient = new mongodb_1.MongoClient(MONGO_URI);
@@ -28,12 +26,6 @@ const connectDatabase = async () => {
         const recommendationsCollection = database.collection(RECOMMENDATIONS_COLLECTION);
         await recommendationsCollection.createIndex({ applicationId: 1, documentName: 1, version: 1 }, { unique: true });
         await recommendationsCollection.createIndex({ applicationId: 1 });
-        // Access control indexes
-        const accessCollection = database.collection(ACCESS_COLLECTION);
-        await accessCollection.createIndex({ applicationId: 1, email: 1 }, { unique: true });
-        // Chat indexes
-        const chatCollection = database.collection(CHAT_COLLECTION);
-        await chatCollection.createIndex({ applicationId: 1, documentName: 1, createdAt: -1 });
     }
     catch (error) {
         console.error('❌ Failed to connect to MongoDB:', error);
@@ -143,20 +135,6 @@ const getRecommendationsCollection = () => {
     return database.collection(RECOMMENDATIONS_COLLECTION);
 };
 exports.getRecommendationsCollection = getRecommendationsCollection;
-const getAccessCollection = () => {
-    if (!database) {
-        throw new Error('Database not connected');
-    }
-    return database.collection(ACCESS_COLLECTION);
-};
-exports.getAccessCollection = getAccessCollection;
-const getChatCollection = () => {
-    if (!database) {
-        throw new Error('Database not connected');
-    }
-    return database.collection(CHAT_COLLECTION);
-};
-exports.getChatCollection = getChatCollection;
 const saveEvaluation = async (applicationId, evaluation) => {
     const collection = (0, exports.getEvaluationsCollection)();
     await collection.updateOne({ applicationId }, {
@@ -221,71 +199,6 @@ const updateRecommendationStatus = async (applicationId, documentName, version, 
     });
 };
 exports.updateRecommendationStatus = updateRecommendationStatus;
-// Access control helpers
-const upsertAccessGrant = async (applicationId, email, role, permissions, invitedBy) => {
-    const collection = (0, exports.getAccessCollection)();
-    await collection.updateOne({ applicationId, email }, {
-        $set: {
-            applicationId,
-            email,
-            role,
-            permissions,
-            invitedBy,
-            updatedAt: new Date(),
-        },
-        $setOnInsert: {
-            createdAt: new Date(),
-        }
-    }, { upsert: true });
-};
-exports.upsertAccessGrant = upsertAccessGrant;
-const listAccessGrants = async (applicationId) => {
-    const collection = (0, exports.getAccessCollection)();
-    return collection.find({ applicationId }).sort({ createdAt: 1 }).toArray();
-};
-exports.listAccessGrants = listAccessGrants;
-const removeAccessGrant = async (applicationId, email) => {
-    const collection = (0, exports.getAccessCollection)();
-    await collection.deleteOne({ applicationId, email });
-};
-exports.removeAccessGrant = removeAccessGrant;
-const hasAccess = async (applicationId, email, required) => {
-    const collection = (0, exports.getAccessCollection)();
-    const record = await collection.findOne({ applicationId, email });
-    if (!record)
-        return false;
-    if (record.role === 'admin')
-        return true;
-    return record.permissions.includes(required);
-};
-exports.hasAccess = hasAccess;
-// Chat helpers
-const insertChatMessage = async (applicationId, documentName, role, message, recommendationIds, actions) => {
-    const collection = (0, exports.getChatCollection)();
-    await collection.insertOne({
-        applicationId,
-        documentName,
-        role,
-        message,
-        recommendationIds,
-        actions,
-        createdAt: new Date()
-    });
-};
-exports.insertChatMessage = insertChatMessage;
-const listChatMessages = async (applicationId, documentName, limit = 20) => {
-    const collection = (0, exports.getChatCollection)();
-    const query = { applicationId };
-    if (documentName)
-        query.documentName = documentName;
-    return collection
-        .find(query)
-        .sort({ createdAt: -1 })
-        .limit(limit)
-        .toArray()
-        .then(list => list.reverse());
-};
-exports.listChatMessages = listChatMessages;
 exports.default = {
     connectDatabase: exports.connectDatabase,
     disconnectDatabase: exports.disconnectDatabase,
@@ -301,14 +214,6 @@ exports.default = {
     getRecommendationsCollection: exports.getRecommendationsCollection,
     saveRecommendationsVersion: exports.saveRecommendationsVersion,
     getRecommendationsTrail: exports.getRecommendationsTrail,
-    updateRecommendationStatus: exports.updateRecommendationStatus,
-    getAccessCollection: exports.getAccessCollection,
-    upsertAccessGrant: exports.upsertAccessGrant,
-    listAccessGrants: exports.listAccessGrants,
-    removeAccessGrant: exports.removeAccessGrant,
-    hasAccess: exports.hasAccess,
-    getChatCollection: exports.getChatCollection,
-    insertChatMessage: exports.insertChatMessage,
-    listChatMessages: exports.listChatMessages
+    updateRecommendationStatus: exports.updateRecommendationStatus
 };
 //# sourceMappingURL=database.service.js.map

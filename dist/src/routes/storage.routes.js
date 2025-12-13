@@ -40,30 +40,11 @@ const express_1 = require("express");
 const multer_1 = __importDefault(require("multer"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
+const openai_1 = require("openai");
+const config_1 = require("../config");
 const recommendations_service_1 = require("../services/recommendations.service");
-const database_service_1 = require("../services/database.service");
-const email_service_1 = __importDefault(require("../services/email.service"));
-const storage_chat_service_1 = require("../services/storage-chat.service");
-const rate_limit_middleware_1 = require("../middleware/rate-limit.middleware");
-const accessControlEnabled = process.env.ENABLE_ACCESS_CONTROL === 'true';
-async function ensureAccess(req, res, folder, permission) {
-    if (!accessControlEnabled)
-        return { email: undefined };
-    const email = req.headers['x-user-email'] || req.query.userEmail || req.body.userEmail;
-    const grants = await (0, database_service_1.listAccessGrants)(folder);
-    if (grants.length === 0)
-        return { email };
-    if (!email) {
-        res.status(403).json({ error: 'userEmail is required when access control is enabled' });
-        return null;
-    }
-    const allowed = await (0, database_service_1.hasAccess)(folder, email, permission);
-    if (!allowed) {
-        res.status(403).json({ error: 'Access denied for this folder' });
-        return null;
-    }
-    return { email };
-}
+const activity_log_service_1 = require("../services/activity-log.service");
+const openai = new openai_1.OpenAI({ apiKey: config_1.config.OPENAI_API_KEY });
 const router = (0, express_1.Router)();
 // Base directory where application folders live
 function getApplicationsBasePath() {
@@ -86,16 +67,10 @@ function resolveFolder(folderName) {
     return { base, safeName, full };
 }
 // Create a new application folder with standard structure
-router.post('/folders', async (req, res) => {
-    const { name, ownerEmail } = req.body || {};
+router.post('/folders', (req, res) => {
+    const { name } = req.body || {};
     if (!name || typeof name !== 'string') {
         return res.status(400).json({ error: 'Folder name is required' });
-    }
-    if (name.length > 100) {
-        return res.status(400).json({ error: 'Folder name must be 100 characters or less' });
-    }
-    if (!/^[a-zA-Z0-9-_ ]+$/.test(name)) {
-        return res.status(400).json({ error: 'Folder name can only contain letters, numbers, hyphens, underscores, and spaces' });
     }
     const { full, safeName } = resolveFolder(name);
     if (fs.existsSync(full)) {
@@ -115,13 +90,43 @@ router.post('/folders', async (req, res) => {
         documents: [],
     };
     fs.writeFileSync(path.join(full, 'application.json'), JSON.stringify(appJson, null, 2));
-    if (ownerEmail) {
-        await (0, database_service_1.upsertAccessGrant)(safeName, ownerEmail, 'admin', ['view', 'edit', 'delete'], ownerEmail);
-    }
+    (0, activity_log_service_1.appendActivity)(getApplicationsBasePath(), {
+        id: `create-${safeName}-${Date.now()}`,
+        userEmail: String(req.header('x-user-email') || ''),
+        userRole: String(req.header('x-user-role') || ''),
+        action: 'create-folder',
+        folder: safeName,
+        timestamp: new Date().toISOString(),
+    });
     return res.status(201).json({
         message: 'Folder created',
         folder: safeName,
         path: full,
+    });
+});
+// Delete a folder
+router.delete('/folders', (req, res) => {
+    const { folder } = req.body || {};
+    if (!folder || typeof folder !== 'string') {
+        return res.status(400).json({ error: 'Folder name is required' });
+    }
+    const { full, safeName } = resolveFolder(folder);
+    if (!fs.existsSync(full)) {
+        return res.status(404).json({ error: 'Folder not found' });
+    }
+    // Recursively delete folder
+    fs.rmSync(full, { recursive: true, force: true });
+    (0, activity_log_service_1.appendActivity)(getApplicationsBasePath(), {
+        id: `delete-${safeName}-${Date.now()}`,
+        userEmail: String(req.header('x-user-email') || ''),
+        userRole: String(req.header('x-user-role') || ''),
+        action: 'delete-folder',
+        folder: safeName,
+        timestamp: new Date().toISOString(),
+    });
+    return res.status(200).json({
+        message: 'Folder deleted',
+        folder: safeName
     });
 });
 // Multer storage configured to place files under the specified folder's documents directory
@@ -143,44 +148,13 @@ const storage = multer_1.default.diskStorage({
         cb(null, safe);
     }
 });
-const upload = (0, multer_1.default)({
-    storage,
-    limits: {
-        fileSize: 50 * 1024 * 1024, // 50MB per file
-        files: 20
-    },
-    fileFilter: (_req, file, cb) => {
-        // Allowed extensions
-        const allowed = /\.(pdf|docx?|txt|jpg|jpeg|png|xlsx?|csv)$/i;
-        if (!allowed.test(file.originalname)) {
-            return cb(new Error(`File type not allowed: ${file.originalname}. Accepted: PDF, DOCX, TXT, JPG, PNG, XLSX, CSV`));
-        }
-        cb(null, true);
-    }
-});
+const upload = (0, multer_1.default)({ storage });
 // Upload one or multiple files to a folder
-router.post('/upload', rate_limit_middleware_1.uploadLimiter, (req, res, next) => {
-    const uploadHandler = upload.array('files', 20);
-    uploadHandler(req, res, (err) => {
-        if (err) {
-            if (err.code === 'LIMIT_FILE_SIZE') {
-                return res.status(413).json({ error: 'File too large. Maximum size is 50MB per file.' });
-            }
-            if (err.code === 'LIMIT_FILE_COUNT') {
-                return res.status(413).json({ error: 'Too many files. Maximum is 20 files per upload.' });
-            }
-            return res.status(400).json({ error: err.message || 'Upload failed' });
-        }
-        return next();
-    });
-}, async (req, res) => {
+router.post('/upload', upload.array('files', 20), async (req, res) => {
     const folderName = String(req.body.folder || req.query.folder || '');
     if (!folderName) {
         return res.status(400).json({ error: 'Target folder is required' });
     }
-    const access = await ensureAccess(req, res, folderName, 'edit');
-    if (!access)
-        return;
     const files = req.files || [];
     if (!files.length) {
         return res.status(400).json({ error: 'No files uploaded. Use field name "files".' });
@@ -211,6 +185,15 @@ router.post('/upload', rate_limit_middleware_1.uploadLimiter, (req, res, next) =
             // continue even if one fails
         }
     }
+    (0, activity_log_service_1.appendActivity)(getApplicationsBasePath(), {
+        id: `upload-${folderName}-${Date.now()}`,
+        userEmail: String(req.header('x-user-email') || ''),
+        userRole: String(req.header('x-user-role') || ''),
+        action: 'upload-files',
+        folder: folderName,
+        meta: { files: files.map(f => f.filename) },
+        timestamp: new Date().toISOString(),
+    });
     return res.status(200).json({
         message: 'Files uploaded',
         folder: folderName,
@@ -232,18 +215,14 @@ router.get('/files', (req, res) => {
         res.status(400).json({ error: 'Folder is required' });
         return;
     }
-    ensureAccess(req, res, folderName, 'view').then(allowed => {
-        if (!allowed)
-            return;
-        const { full } = resolveFolder(folderName);
-        const docsDir = path.join(full, 'documents');
-        if (!fs.existsSync(docsDir)) {
-            res.json({ files: [] });
-            return;
-        }
-        const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
-        res.json({ files });
-    });
+    const { full } = resolveFolder(folderName);
+    const docsDir = path.join(full, 'documents');
+    if (!fs.existsSync(docsDir)) {
+        res.json({ files: [] });
+        return;
+    }
+    const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
+    res.json({ files });
 });
 // Get recommendations trail for a folder (optionally filter by document)
 router.get('/recommendations', async (req, res) => {
@@ -254,9 +233,6 @@ router.get('/recommendations', async (req, res) => {
         return;
     }
     try {
-        const access = await ensureAccess(req, res, folderName, 'view');
-        if (!access)
-            return;
         const trail = await (0, recommendations_service_1.listRecommendations)(folderName, documentName);
         res.json({ trail });
     }
@@ -267,174 +243,157 @@ router.get('/recommendations', async (req, res) => {
 // Accept or reject recommendations by IDs on a specific version
 router.post('/recommendations/decision', async (req, res) => {
     const { folder, document, version, acceptIds, rejectIds } = req.body || {};
+    const userRole = String(req.header('x-user-role') || '');
+    // Simple role enforcement: only owner/editor can modify recommendations
+    if (!userRole || !['owner', 'editor'].includes(userRole)) {
+        res.status(403).json({ error: 'Insufficient role to modify recommendations' });
+        return;
+    }
     if (!folder || !document || typeof version !== 'number') {
         res.status(400).json({ error: 'folder, document, and numeric version are required' });
         return;
     }
     try {
-        const access = await ensureAccess(req, res, folder, 'edit');
-        if (!access)
-            return;
         await (0, recommendations_service_1.acceptOrRejectRecommendations)(String(folder), String(document), Number(version), acceptIds || [], rejectIds || []);
+        (0, activity_log_service_1.appendActivity)(getApplicationsBasePath(), {
+            id: `decide-${folder}-${document}-${version}-${Date.now()}`,
+            userEmail: String(req.header('x-user-email') || ''),
+            userRole,
+            action: 'recommendations-decision',
+            folder: String(folder),
+            document: String(document),
+            version: Number(version),
+            meta: { acceptIds: acceptIds || [], rejectIds: rejectIds || [] },
+            timestamp: new Date().toISOString(),
+        });
         res.json({ message: 'Updated recommendation statuses' });
     }
     catch (e) {
         res.status(500).json({ error: e?.message || 'Failed to update recommendation statuses' });
     }
 });
-// Delete a folder (requires delete permission)
-router.delete('/folders', async (req, res) => {
-    const folderName = String(req.body.folder || req.query.folder || '');
-    if (!folderName) {
-        res.status(400).json({ error: 'Folder is required' });
-        return;
-    }
-    try {
-        const access = await ensureAccess(req, res, folderName, 'delete');
-        if (!access)
-            return;
-        const { full } = resolveFolder(folderName);
-        if (!fs.existsSync(full)) {
-            res.status(404).json({ error: 'Folder not found' });
-            return;
-        }
-        // Remove entire folder recursively
-        fs.rmSync(full, { recursive: true, force: true });
-        // Clean up access grants
-        const grants = await (0, database_service_1.listAccessGrants)(folderName);
-        for (const g of grants) {
-            await (0, database_service_1.removeAccessGrant)(folderName, g.email);
-        }
-        res.json({ message: 'Folder deleted', folder: folderName });
-    }
-    catch (e) {
-        res.status(500).json({ error: e?.message || 'Failed to delete folder' });
-    }
-});
-// Delete a file from a folder (requires delete permission)
-router.delete('/files', async (req, res) => {
-    const folderName = String(req.body.folder || req.query.folder || '');
-    const fileName = String(req.body.file || req.query.file || '');
-    if (!folderName || !fileName) {
-        res.status(400).json({ error: 'Folder and file are required' });
-        return;
-    }
-    try {
-        const access = await ensureAccess(req, res, folderName, 'delete');
-        if (!access)
-            return;
-        const { full } = resolveFolder(folderName);
-        const filePath = path.join(full, 'documents', fileName);
-        if (!fs.existsSync(filePath)) {
-            res.status(404).json({ error: 'File not found' });
-            return;
-        }
-        fs.unlinkSync(filePath);
-        // Update application.json
-        const appJsonPath = path.join(full, 'application.json');
-        if (fs.existsSync(appJsonPath)) {
-            try {
-                const data = JSON.parse(fs.readFileSync(appJsonPath, 'utf-8'));
-                data.documents = (data.documents || []).filter((d) => d !== fileName);
-                fs.writeFileSync(appJsonPath, JSON.stringify(data, null, 2));
-            }
-            catch { }
-        }
-        res.json({ message: 'File deleted', file: fileName });
-    }
-    catch (e) {
-        res.status(500).json({ error: e?.message || 'Failed to delete file' });
-    }
-});
-// Access control: list grants
-router.get('/access', async (req, res) => {
-    const folderName = String(req.query.folder || '');
-    if (!folderName) {
-        res.status(400).json({ error: 'Folder is required' });
-        return;
-    }
-    try {
-        const access = await ensureAccess(req, res, folderName, 'view');
-        if (!access)
-            return;
-        const grants = await (0, database_service_1.listAccessGrants)(folderName);
-        res.json({ grants, accessControlEnabled });
-    }
-    catch (e) {
-        res.status(500).json({ error: e?.message || 'Failed to list access' });
-    }
-});
-// Access control: invite or update role
-router.post('/access/invite', async (req, res) => {
-    const { folder, email, role, permissions, invitedBy, inviteLink } = req.body || {};
-    if (!folder || !email || !role) {
-        res.status(400).json({ error: 'folder, email, and role are required' });
-        return;
-    }
-    const perms = permissions && Array.isArray(permissions) && permissions.length
-        ? permissions
-        : role === 'viewer' ? ['view'] : role === 'editor' ? ['view', 'edit'] : ['view', 'edit', 'delete'];
-    try {
-        await (0, database_service_1.upsertAccessGrant)(String(folder), String(email).toLowerCase(), role, perms, invitedBy);
-        await email_service_1.default.sendInviteEmail({ to: email, folder, role, invitedBy, link: inviteLink });
-        const grants = await (0, database_service_1.listAccessGrants)(folder);
-        res.json({ message: 'Access granted', grants });
-    }
-    catch (e) {
-        res.status(500).json({ error: e?.message || 'Failed to grant access' });
-    }
-});
-// Access control: revoke
-router.delete('/access', async (req, res) => {
-    const { folder, email } = req.body || {};
-    if (!folder || !email) {
-        res.status(400).json({ error: 'folder and email are required' });
-        return;
-    }
-    try {
-        await (0, database_service_1.removeAccessGrant)(String(folder), String(email).toLowerCase());
-        const grants = await (0, database_service_1.listAccessGrants)(folder);
-        res.json({ message: 'Access removed', grants });
-    }
-    catch (e) {
-        res.status(500).json({ error: e?.message || 'Failed to remove access' });
-    }
-});
-// Chat about recommendations
+// Chat endpoint with AI-powered conversations about recommendations
 router.post('/chat', async (req, res) => {
     const { folder, document, message } = req.body || {};
-    if (!folder || !message) {
+    const userRole = String(req.header('x-user-role') || 'owner');
+    if (!folder || typeof message !== 'string') {
         res.status(400).json({ error: 'folder and message are required' });
         return;
     }
+    const normalized = String(message).toLowerCase();
+    let applied = 0;
+    let reply = '';
     try {
-        const access = await ensureAccess(req, res, folder, 'view');
-        if (!access)
-            return;
-        const result = await (0, storage_chat_service_1.chatAboutRecommendations)(String(folder), document ? String(document) : undefined, String(message));
-        res.json(result);
+        // Get current recommendations context
+        const trail = await (0, recommendations_service_1.listRecommendations)(String(folder), document ? String(document) : undefined);
+        const pendingCount = (trail || []).reduce((sum, e) => sum + (e.recommendations || []).filter((r) => r.status === 'pending').length, 0);
+        const acceptedCount = (trail || []).reduce((sum, e) => sum + (e.recommendations || []).filter((r) => r.status === 'accepted').length, 0);
+        const rejectedCount = (trail || []).reduce((sum, e) => sum + (e.recommendations || []).filter((r) => r.status === 'rejected').length, 0);
+        // Check for action intents first
+        if (normalized.includes('apply') && (normalized.includes('all') || normalized.includes('pending'))) {
+            for (const entry of trail || []) {
+                const pendingIds = (entry.recommendations || []).filter((r) => r.status === 'pending').map((r) => r.id);
+                if (pendingIds.length) {
+                    await (0, recommendations_service_1.acceptOrRejectRecommendations)(String(folder), String(entry.documentName), Number(entry.version), pendingIds, []);
+                    applied += pendingIds.length;
+                }
+            }
+            reply = applied
+                ? `✅ Done! I applied ${applied} pending recommendation(s) for you.`
+                : 'There are no pending recommendations to apply at the moment.';
+        }
+        else if (normalized.includes('reject') && normalized.includes('all')) {
+            for (const entry of trail || []) {
+                const pendingIds = (entry.recommendations || []).filter((r) => r.status === 'pending').map((r) => r.id);
+                if (pendingIds.length) {
+                    await (0, recommendations_service_1.acceptOrRejectRecommendations)(String(folder), String(entry.documentName), Number(entry.version), [], pendingIds);
+                    applied += pendingIds.length;
+                }
+            }
+            reply = applied
+                ? `❌ Rejected ${applied} pending recommendation(s).`
+                : 'There are no pending recommendations to reject.';
+        }
+        else {
+            // Use OpenAI for conversational responses
+            const recommendationsSummary = (trail || []).map((e) => ({
+                document: e.documentName,
+                version: e.version,
+                recommendations: (e.recommendations || []).map((r) => ({
+                    status: r.status,
+                    point: r.point
+                }))
+            }));
+            const systemPrompt = `You are a helpful AI assistant for managing software licensing recommendations. 
+You have access to the following context about the current folder "${folder}":
+- Total pending recommendations: ${pendingCount}
+- Total accepted recommendations: ${acceptedCount}
+- Total rejected recommendations: ${rejectedCount}
+- Current recommendations: ${JSON.stringify(recommendationsSummary, null, 2)}
+
+Help the user understand their recommendations and guide them on actions they can take.
+Available commands they can use:
+- "Apply all" or "Accept all pending" - to accept all pending recommendations
+- "Reject all" - to reject all pending recommendations
+- Ask about specific recommendations or documents
+
+Keep responses concise and helpful. Use emojis sparingly to make responses friendly.`;
+            try {
+                const completion = await openai.chat.completions.create({
+                    model: config_1.config.OPENAI_MODEL || 'gpt-4o',
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: message }
+                    ],
+                    max_tokens: 500,
+                    temperature: 0.7
+                });
+                reply = completion.choices[0]?.message?.content || 'I understood your message. How can I help you with your recommendations?';
+            }
+            catch (aiError) {
+                console.error('OpenAI chat error:', aiError?.message);
+                // Fallback to basic responses
+                if (normalized.includes('pending') || normalized.includes('status')) {
+                    reply = pendingCount
+                        ? `📋 You have ${pendingCount} pending, ${acceptedCount} accepted, and ${rejectedCount} rejected recommendation(s).`
+                        : 'No pending recommendations. Everything is up to date!';
+                }
+                else if (normalized.includes('help')) {
+                    reply = `I can help you manage recommendations! Try:\n• "What's pending?" - see pending items\n• "Apply all" - accept all pending\n• "Reject all" - reject all pending`;
+                }
+                else {
+                    reply = `I'm here to help with your recommendations. You have ${pendingCount} pending items. Say "apply all" to accept them or ask me anything!`;
+                }
+            }
+        }
+        (0, activity_log_service_1.appendActivity)(getApplicationsBasePath(), {
+            id: `chat-${folder}-${Date.now()}`,
+            userEmail: String(req.header('x-user-email') || ''),
+            userRole,
+            action: 'chat',
+            folder: String(folder),
+            document: document ? String(document) : undefined,
+            meta: { message, applied, reply: reply.substring(0, 100) },
+            timestamp: new Date().toISOString(),
+        });
+        res.json({ reply, applied });
     }
     catch (e) {
-        res.status(500).json({ error: e?.message || 'Chat failed' });
+        console.error('Chat error:', e);
+        res.status(500).json({ error: e?.message || 'Chat action failed' });
     }
 });
-router.get('/chat', async (req, res) => {
+// GET /storage/chat returns empty history placeholder (no persistence implemented here)
+router.get('/chat', async (_req, res) => {
+    res.json({ history: [] });
+});
+// Activity log endpoint for UI visibility
+router.get('/activity', (req, res) => {
     const folderName = String(req.query.folder || '');
-    const documentName = req.query.document ? String(req.query.document) : undefined;
-    if (!folderName) {
-        res.status(400).json({ error: 'Folder is required' });
-        return;
-    }
-    try {
-        const access = await ensureAccess(req, res, folderName, 'view');
-        if (!access)
-            return;
-        const history = await (0, storage_chat_service_1.listStorageChat)(folderName, documentName);
-        res.json({ history });
-    }
-    catch (e) {
-        res.status(500).json({ error: e?.message || 'Failed to load chat history' });
-    }
+    const base = getApplicationsBasePath();
+    const all = (0, activity_log_service_1.readActivities)(base);
+    const filtered = folderName ? all.filter(a => a.folder === folderName) : all;
+    res.json({ activities: filtered });
 });
 exports.default = router;
 //# sourceMappingURL=storage.routes.js.map
