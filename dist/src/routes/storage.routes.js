@@ -40,12 +40,94 @@ const express_1 = require("express");
 const multer_1 = __importDefault(require("multer"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
-const openai_1 = require("openai");
 const config_1 = require("../config");
 const recommendations_service_1 = require("../services/recommendations.service");
 const activity_log_service_1 = require("../services/activity-log.service");
-const openai = new openai_1.OpenAI({ apiKey: config_1.config.OPENAI_API_KEY });
+const database_service_1 = require("../services/database.service");
+const pdf_parse_1 = __importDefault(require("pdf-parse"));
+const mammoth_1 = __importDefault(require("mammoth"));
+// Helper function for new OpenAI Responses API (gpt-5.1)
+async function callOpenAIResponses(input, options) {
+    const url = 'https://api.openai.com/v1/responses';
+    const startTime = Date.now();
+    const body = {
+        model: config_1.config.OPENAI_MODEL || 'gpt-5.1',
+        input: input
+    };
+    if (options?.reasoning) {
+        // Use 'low' effort for faster responses (was 'high' - took 28s, 'low' should be ~5-8s)
+        body.reasoning = { effort: 'low' };
+    }
+    if (options?.webSearch) {
+        body.tools = [{ type: 'web_search_preview' }];
+    }
+    const inputLength = typeof input === 'string' ? input.length : JSON.stringify(input).length;
+    console.log(`🤖 [OpenAI] Starting request - Model: ${body.model}, Input: ${inputLength} chars, Reasoning: ${options?.reasoning || false}`);
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config_1.config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+    });
+    const fetchTime = Date.now() - startTime;
+    if (!response.ok) {
+        const error = await response.text();
+        console.error(`❌ [OpenAI] Error after ${fetchTime}ms:`, error);
+        throw new Error(`OpenAI API error: ${response.statusText}`);
+    }
+    const data = await response.json();
+    const totalTime = Date.now() - startTime;
+    console.log(`✅ [OpenAI] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s)`);
+    // Parse new Responses API format: { output: [{ type: "message", content: [{ type: "output_text", text: "..." }] }] }
+    if (data.output && Array.isArray(data.output)) {
+        for (const item of data.output) {
+            if (item.type === 'message' && Array.isArray(item.content)) {
+                for (const contentItem of item.content) {
+                    if (contentItem.type === 'output_text' && contentItem.text) {
+                        console.log(`📊 [OpenAI] Output: ${contentItem.text.length} chars`);
+                        return contentItem.text;
+                    }
+                }
+            }
+        }
+    }
+    // Fallback for legacy format
+    return data.choices?.[0]?.message?.content || '';
+}
 const router = (0, express_1.Router)();
+// Helper function to extract text from various file types
+async function readFileText(filePath) {
+    try {
+        // Check if file exists and has content
+        if (!fs.existsSync(filePath)) {
+            console.error('File does not exist:', filePath);
+            return '[File not found]';
+        }
+        const stats = fs.statSync(filePath);
+        if (stats.size === 0) {
+            console.error('File is empty (0 bytes):', filePath);
+            return '[File is empty - upload may have failed. Please re-upload this document.]';
+        }
+        const lower = filePath.toLowerCase();
+        if (lower.endsWith('.pdf')) {
+            const buffer = fs.readFileSync(filePath);
+            const data = await (0, pdf_parse_1.default)(buffer);
+            return data.text || '';
+        }
+        if (lower.endsWith('.docx')) {
+            const result = await mammoth_1.default.extractRawText({ path: filePath });
+            return result.value || '';
+        }
+        // Fallback to plain text
+        return fs.readFileSync(filePath, 'utf-8');
+    }
+    catch (err) {
+        console.error('Error reading file:', filePath, err);
+        return '[Error: Could not extract text from this document. The file may be corrupted or in an unsupported format.]';
+    }
+}
 // Base directory where application folders live
 function getApplicationsBasePath() {
     // Prefer workspace root ../applications; fallback to backend/applications
@@ -173,18 +255,8 @@ router.post('/upload', upload.array('files', 20), async (req, res) => {
             // ignore malformed json
         }
     }
-    // Trigger AI recommendations generation per uploaded file
-    const generated = [];
-    for (const f of files) {
-        const docPath = f.path;
-        try {
-            const { version } = await (0, recommendations_service_1.generateRecommendationsForUpload)(folderName, docPath, f.filename);
-            generated.push({ name: f.filename, version });
-        }
-        catch (e) {
-            // continue even if one fails
-        }
-    }
+    // NOTE: Recommendations are now generated on-demand when chat opens (not during upload)
+    // This dramatically improves upload speed - no AI processing during upload
     (0, activity_log_service_1.appendActivity)(getApplicationsBasePath(), {
         id: `upload-${folderName}-${Date.now()}`,
         userEmail: String(req.header('x-user-email') || ''),
@@ -194,11 +266,12 @@ router.post('/upload', upload.array('files', 20), async (req, res) => {
         meta: { files: files.map(f => f.filename) },
         timestamp: new Date().toISOString(),
     });
+    console.log(`📤 Upload complete - Files: ${files.map(f => f.filename).join(', ')} (No AI processing at upload time)`);
     return res.status(200).json({
         message: 'Files uploaded',
         folder: folderName,
         files: files.map(f => ({ name: f.filename, size: f.size })),
-        recommendationsGenerated: generated
+        recommendationsGenerated: [] // Recommendations generated on-demand via chat
     });
 });
 // List folders
@@ -224,7 +297,56 @@ router.get('/files', (req, res) => {
     const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
     res.json({ files });
 });
-// Get recommendations trail for a folder (optionally filter by document)
+// Download a file from a folder
+router.get('/download', (req, res) => {
+    const folderName = String(req.query.folder || '');
+    const fileName = String(req.query.file || '');
+    if (!folderName || !fileName) {
+        res.status(400).json({ error: 'folder and file are required' });
+        return;
+    }
+    const { full } = resolveFolder(folderName);
+    const filePath = path.join(full, 'documents', fileName);
+    if (!fs.existsSync(filePath)) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+    }
+    res.download(filePath, fileName);
+});
+// Delete a file from a folder
+router.delete('/files', async (req, res) => {
+    const { folder, fileName } = req.body || {};
+    if (!folder || !fileName) {
+        res.status(400).json({ error: 'folder and fileName are required' });
+        return;
+    }
+    const { full } = resolveFolder(String(folder));
+    const filePath = path.join(full, 'documents', String(fileName));
+    if (!fs.existsSync(filePath)) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+    }
+    try {
+        // Delete the file
+        fs.unlinkSync(filePath);
+        // Delete associated recommendations from MongoDB
+        await (0, database_service_1.deleteRecommendationsForDocument)(String(folder), String(fileName));
+        (0, activity_log_service_1.appendActivity)(getApplicationsBasePath(), {
+            id: `delete-file-${folder}-${Date.now()}`,
+            userEmail: String(req.header('x-user-email') || ''),
+            userRole: String(req.header('x-user-role') || ''),
+            action: 'delete-file',
+            folder: String(folder),
+            meta: { fileName: String(fileName) },
+            timestamp: new Date().toISOString(),
+        });
+        res.json({ message: 'File deleted successfully' });
+    }
+    catch (e) {
+        res.status(500).json({ error: e?.message || 'Failed to delete file' });
+    }
+});
+// Get all recommendations for a specific folder (or folder+document)
 router.get('/recommendations', async (req, res) => {
     const folderName = String(req.query.folder || '');
     const documentName = req.query.document ? String(req.query.document) : undefined;
@@ -234,7 +356,17 @@ router.get('/recommendations', async (req, res) => {
     }
     try {
         const trail = await (0, recommendations_service_1.listRecommendations)(folderName, documentName);
-        res.json({ trail });
+        // Filter out recommendations for files that no longer exist on disk
+        const basePath = getApplicationsBasePath();
+        const filteredTrail = trail.filter((entry) => {
+            const docPath = path.join(basePath, folderName, 'documents', entry.documentName);
+            const exists = fs.existsSync(docPath);
+            if (!exists) {
+                console.log(`⚠️  File not found, filtering out: ${entry.documentName}`);
+            }
+            return exists;
+        });
+        res.json({ trail: filteredTrail });
     }
     catch (e) {
         res.status(500).json({ error: e?.message || 'Failed to list recommendations' });
@@ -276,6 +408,7 @@ router.post('/recommendations/decision', async (req, res) => {
 router.post('/chat', async (req, res) => {
     const { folder, document, message } = req.body || {};
     const userRole = String(req.header('x-user-role') || 'owner');
+    console.log(`💬 Chat request - Folder: ${folder}, Document: ${document}, Message: ${message?.substring(0, 50)}`);
     if (!folder || typeof message !== 'string') {
         res.status(400).json({ error: 'folder and message are required' });
         return;
@@ -324,14 +457,42 @@ router.post('/chat', async (req, res) => {
                     point: r.point
                 }))
             }));
-            const systemPrompt = `You are a helpful AI assistant for managing software licensing recommendations. 
+            // If a document is specified, read its content
+            let documentContent = '';
+            if (document) {
+                console.log(`📖 Reading document content for: ${document}`);
+                const { full } = resolveFolder(String(folder));
+                const docPath = path.join(full, 'documents', String(document));
+                console.log(`📂 Document path: ${docPath}`);
+                if (fs.existsSync(docPath)) {
+                    documentContent = await readFileText(docPath);
+                    console.log(`✅ Extracted ${documentContent.length} characters from document`);
+                    if (!documentContent.trim()) {
+                        documentContent = '[Document content could not be extracted or is empty]';
+                    }
+                    // No truncation - gpt-5.1 handles full documents
+                }
+                else {
+                    console.log(`❌ Document file not found at: ${docPath}`);
+                }
+            }
+            else {
+                console.log(`ℹ️ No document specified in chat request`);
+            }
+            const systemPrompt = `You are a helpful AI assistant for managing software licensing and compliance documents. 
 You have access to the following context about the current folder "${folder}":
 - Total pending recommendations: ${pendingCount}
 - Total accepted recommendations: ${acceptedCount}
 - Total rejected recommendations: ${rejectedCount}
 - Current recommendations: ${JSON.stringify(recommendationsSummary, null, 2)}
+${documentContent ? `\n\nDocument Content for "${document}":\n---\n${documentContent}\n---\n` : ''}
 
-Help the user understand their recommendations and guide them on actions they can take.
+Help the user understand their documents and recommendations. You can:
+- Summarize document content
+- Answer questions about specific sections
+- Explain recommendations and their importance
+- Guide them on actions they can take
+
 Available commands they can use:
 - "Apply all" or "Accept all pending" - to accept all pending recommendations
 - "Reject all" - to reject all pending recommendations
@@ -339,16 +500,18 @@ Available commands they can use:
 
 Keep responses concise and helpful. Use emojis sparingly to make responses friendly.`;
             try {
-                const completion = await openai.chat.completions.create({
-                    model: config_1.config.OPENAI_MODEL || 'gpt-4o',
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: message }
-                    ],
-                    max_tokens: 500,
-                    temperature: 0.7
-                });
-                reply = completion.choices[0]?.message?.content || 'I understood your message. How can I help you with your recommendations?';
+                // Determine if this is a simple summary request or a complex analysis
+                // Simple summaries don't need reasoning (faster: ~3-5s), complex analysis uses reasoning (~8-10s)
+                const isSimpleSummary = normalized.includes('summary') ||
+                    normalized.includes('summarize') ||
+                    normalized.includes('overview') ||
+                    normalized.includes('what is this') ||
+                    normalized.includes('brief');
+                const useReasoning = !isSimpleSummary; // Skip reasoning for simple summaries
+                console.log(`🧠 Chat mode: ${isSimpleSummary ? 'Fast Summary (no reasoning)' : 'Analysis (with reasoning)'}`);
+                // Use new Responses API - reasoning only for complex questions
+                const fullInput = `${systemPrompt}\n\nUser Question: ${message}`;
+                reply = await callOpenAIResponses(fullInput, { reasoning: useReasoning });
             }
             catch (aiError) {
                 console.error('OpenAI chat error:', aiError?.message);
@@ -386,6 +549,84 @@ Keep responses concise and helpful. Use emojis sparingly to make responses frien
 // GET /storage/chat returns empty history placeholder (no persistence implemented here)
 router.get('/chat', async (_req, res) => {
     res.json({ history: [] });
+});
+// Apply changes with GPT-5.1 - creates updated file with recommendations
+router.post('/apply-changes', async (req, res) => {
+    const { folder, document, recommendations } = req.body;
+    if (!folder || !document || !Array.isArray(recommendations)) {
+        res.status(400).json({ error: 'folder, document, and recommendations array are required' });
+        return;
+    }
+    const startTime = Date.now();
+    try {
+        const { full } = resolveFolder(String(folder));
+        const originalFilePath = path.join(full, 'documents', String(document));
+        console.log(`📝 Applying ${recommendations.length} changes to: ${originalFilePath}`);
+        if (!fs.existsSync(originalFilePath)) {
+            console.error(`❌ File not found: ${originalFilePath}`);
+            res.status(404).json({ error: 'Original file not found' });
+            return;
+        }
+        // Read original file content (supports docx, pdf, txt)
+        const originalContent = await readFileText(originalFilePath);
+        console.log(`📖 Read ${originalContent.length} characters from original document`);
+        // Prepare recommendations summary
+        const recommendationsList = recommendations
+            .map((r, idx) => `${idx + 1}. ${r.point}`)
+            .join('\n');
+        // Use GPT-5.1 for applying changes
+        const systemPrompt = `You are an expert document editor. Apply the provided recommendations to the document and return the complete updated version.
+
+IMPORTANT INSTRUCTIONS:
+- Apply ALL recommendations listed below to the document
+- Return ONLY the updated document content
+- Do NOT include any explanations, commentary, or markdown code blocks
+- Do NOT include phrases like "Here is the updated document" 
+- Maintain the original document structure, headings, and formatting style
+- Make changes seamlessly integrated into the document
+- If a recommendation suggests adding new content, insert it in the most appropriate location
+- If a recommendation suggests modifying existing content, make the change while preserving context`;
+        const userPrompt = `ORIGINAL DOCUMENT:
+---
+${originalContent}
+---
+
+RECOMMENDATIONS TO APPLY:
+${recommendationsList}
+
+Return the complete updated document with all recommendations applied. Start directly with the document content.`;
+        console.log(`🤖 Sending to GPT-5.1 for document generation...`);
+        const fullInput = `${systemPrompt}\n\n${userPrompt}`;
+        const updatedContent = await callOpenAIResponses(fullInput, { reasoning: true });
+        const processTime = Date.now() - startTime;
+        console.log(`✅ Document generated in ${processTime}ms (${(processTime / 1000).toFixed(1)}s)`);
+        // Create new versioned file (don't overwrite original)
+        const baseName = path.basename(String(document), path.extname(String(document)));
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+        const newFileName = `${baseName}_updated_${timestamp}.txt`; // Save as .txt to preserve content
+        const newFilePath = path.join(full, 'documents', newFileName);
+        fs.writeFileSync(newFilePath, updatedContent, 'utf-8');
+        console.log(`💾 Saved updated document: ${newFileName}`);
+        // Mark all recommendations as accepted in the database
+        const trail = await (0, recommendations_service_1.listRecommendations)(String(folder), String(document));
+        const entry = trail?.find((e) => e.documentName === document);
+        if (entry) {
+            const allIds = entry.recommendations.map((r) => r.id);
+            await (0, recommendations_service_1.acceptOrRejectRecommendations)(String(folder), String(document), Number(entry.version), allIds, []);
+        }
+        res.json({
+            success: true,
+            originalFileName: document,
+            newFileName: newFileName,
+            summary: `Applied ${recommendations.length} recommendation(s). New file created: ${newFileName}`,
+            recommendationsApplied: recommendations.length,
+            processingTimeMs: processTime
+        });
+    }
+    catch (e) {
+        console.error('Apply changes error:', e);
+        res.status(500).json({ error: e?.message || 'Failed to apply changes' });
+    }
 });
 // Activity log endpoint for UI visibility
 router.get('/activity', (req, res) => {

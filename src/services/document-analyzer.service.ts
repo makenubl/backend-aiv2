@@ -179,7 +179,7 @@ Respond strictly as JSON with keys: {"category": string, "pvaraCategory": string
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: config.OPENAI_MODEL,
         messages: [{ role: 'user', content: basePrompt }],
         max_completion_tokens: 1000,
       });
@@ -334,7 +334,7 @@ Format your response as a structured analysis.`;
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: config.OPENAI_MODEL,
         messages: [{ role: 'user', content: prompt }],
         max_completion_tokens: 2500
       });

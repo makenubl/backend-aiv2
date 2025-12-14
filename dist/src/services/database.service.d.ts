@@ -48,6 +48,7 @@ export declare const getAllEvaluations: () => Promise<StoredEvaluation[]>;
 export declare const saveRecommendationsVersion: (applicationId: string, documentName: string, version: number, recommendations: RecommendationItem[], originalExtract?: string) => Promise<void>;
 export declare const getRecommendationsTrail: (applicationId: string, documentName?: string) => Promise<DocumentRecommendationTrail[]>;
 export declare const updateRecommendationStatus: (applicationId: string, documentName: string, version: number, ids: string[], status: "accepted" | "rejected") => Promise<void>;
+export declare const deleteRecommendationsForDocument: (applicationId: string, documentName: string) => Promise<void>;
 declare const _default: {
     connectDatabase: () => Promise<void>;
     disconnectDatabase: () => Promise<void>;
@@ -64,6 +65,7 @@ declare const _default: {
     saveRecommendationsVersion: (applicationId: string, documentName: string, version: number, recommendations: RecommendationItem[], originalExtract?: string) => Promise<void>;
     getRecommendationsTrail: (applicationId: string, documentName?: string) => Promise<DocumentRecommendationTrail[]>;
     updateRecommendationStatus: (applicationId: string, documentName: string, version: number, ids: string[], status: "accepted" | "rejected") => Promise<void>;
+    deleteRecommendationsForDocument: (applicationId: string, documentName: string) => Promise<void>;
 };
 export default _default;
 //# sourceMappingURL=database.service.d.ts.map

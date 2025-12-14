@@ -1,12 +1,14 @@
 import dotenv from 'dotenv';
+import path from 'path';
 
-dotenv.config();
+// When running from dist/src/, we need to go up two levels to find .env
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 export const config = {
   PORT: process.env.PORT || 3001,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
-  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o',
-  OPENAI_MAX_TOKENS: parseInt(process.env.OPENAI_MAX_TOKENS || '2500', 10),
+  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-5.1',
+  OPENAI_MAX_TOKENS: parseInt(process.env.OPENAI_MAX_TOKENS || '16000', 10),
   NODE_ENV: process.env.NODE_ENV || 'development',
   // Allow multiple comma-separated origins for local dev convenience (3000/3001/3002)
   CORS_ORIGIN: (process.env.CORS_ORIGIN || 'http://localhost:3000,http://localhost:3001,http://localhost:3002')

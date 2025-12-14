@@ -5,12 +5,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.config = void 0;
 const dotenv_1 = __importDefault(require("dotenv"));
-dotenv_1.default.config();
+const path_1 = __importDefault(require("path"));
+// When running from dist/src/, we need to go up two levels to find .env
+dotenv_1.default.config({ path: path_1.default.resolve(__dirname, '../../.env') });
 exports.config = {
     PORT: process.env.PORT || 3001,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
-    OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o',
-    OPENAI_MAX_TOKENS: parseInt(process.env.OPENAI_MAX_TOKENS || '2500', 10),
+    OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-5.1',
+    OPENAI_MAX_TOKENS: parseInt(process.env.OPENAI_MAX_TOKENS || '16000', 10),
     NODE_ENV: process.env.NODE_ENV || 'development',
     // Allow multiple comma-separated origins for local dev convenience (3000/3001/3002)
     CORS_ORIGIN: (process.env.CORS_ORIGIN || 'http://localhost:3000,http://localhost:3001,http://localhost:3002')

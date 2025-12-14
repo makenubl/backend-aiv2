@@ -1,12 +1,77 @@
 import * as fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import { OpenAI } from 'openai';
 import { config } from '../config';
 import { saveRecommendationsVersion, getRecommendationsTrail, updateRecommendationStatus } from './database.service';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
 
-const openai = new OpenAI({ apiKey: config.OPENAI_API_KEY });
+// Response type for OpenAI Responses API
+interface OpenAIResponsesData {
+  status?: string;
+  output?: Array<{
+    type: string;
+    content?: Array<{
+      type: string;
+      text?: string;
+    }>;
+  }>;
+}
+
+// Use new OpenAI Responses API (gpt-5.1)
+async function callOpenAIResponses(input: string, options?: { reasoning?: boolean }): Promise<string> {
+  const url = 'https://api.openai.com/v1/responses';
+  const startTime = Date.now();
+  
+  const body: any = {
+    model: config.OPENAI_MODEL || 'gpt-5.1',
+    input: input
+  };
+
+  if (options?.reasoning) {
+    // Use 'low' effort for faster responses (was 'medium' - took 41s, 'low' should be ~10-15s)
+    body.reasoning = { effort: 'low' };
+  }
+
+  const inputLength = typeof input === 'string' ? input.length : JSON.stringify(input).length;
+  console.log(`🤖 [OpenAI-Recommendations] Starting request - Model: ${body.model}, Input: ${inputLength} chars`);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  const fetchTime = Date.now() - startTime;
+
+  if (!response.ok) {
+    const error = await response.text();
+    console.error(`❌ [OpenAI-Recommendations] Error after ${fetchTime}ms:`, error);
+    throw new Error(`OpenAI API error: ${response.statusText}`);
+  }
+
+  const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
+  const totalTime = Date.now() - startTime;
+  console.log(`✅ [OpenAI-Recommendations] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
+  
+  // Parse new Responses API format
+  if (data.output && Array.isArray(data.output)) {
+    for (const item of data.output) {
+      if (item.type === 'message' && Array.isArray(item.content)) {
+        for (const contentItem of item.content) {
+          if (contentItem.type === 'output_text' && contentItem.text) {
+            console.log(`📊 [OpenAI-Recommendations] Output: ${contentItem.text.length} chars`);
+            return contentItem.text;
+          }
+        }
+      }
+    }
+  }
+  
+  return '';
+}
 
 export interface GeneratedRecommendation {
   id: string;
@@ -40,10 +105,8 @@ async function readFileText(filePath: string): Promise<string> {
 }
 
 async function generateAIRecommendations(documentName: string, documentContent: string, folderName: string): Promise<string[]> {
-  // Truncate content if too long (keep first 8000 chars for context window)
-  const truncatedContent = documentContent.length > 8000 
-    ? documentContent.substring(0, 8000) + '\n\n[... content truncated ...]' 
-    : documentContent;
+  // No truncation needed with gpt-5.1 - it handles full documents
+  const truncatedContent = documentContent;
 
   if (!truncatedContent.trim()) {
     return [
@@ -85,23 +148,16 @@ Only return the JSON array, nothing else.`;
 
   try {
     console.log(`🤖 Generating AI recommendations for: ${documentName}`);
-    const completion = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL || 'gpt-4o',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      max_tokens: 1000,
-      temperature: 0.7
-    });
-
-    const responseText = completion.choices[0]?.message?.content?.trim() || '[]';
+    
+    const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
+    const responseText = await callOpenAIResponses(fullPrompt, { reasoning: true });
+    
     console.log(`✅ AI response received for: ${documentName}`);
     
     // Parse JSON array from response
     try {
       // Handle markdown code blocks if present
-      let jsonText = responseText;
+      let jsonText = responseText.trim();
       if (jsonText.startsWith('```')) {
         jsonText = jsonText.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
       }

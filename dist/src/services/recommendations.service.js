@@ -41,16 +41,65 @@ exports.acceptOrRejectRecommendations = acceptOrRejectRecommendations;
 exports.listRecommendations = listRecommendations;
 const fs = __importStar(require("fs"));
 const uuid_1 = require("uuid");
-const document_analyzer_service_1 = require("./document-analyzer.service");
+const config_1 = require("../config");
 const database_service_1 = require("./database.service");
 const pdf_parse_1 = __importDefault(require("pdf-parse"));
 const mammoth_1 = __importDefault(require("mammoth"));
+// Use new OpenAI Responses API (gpt-5.1)
+async function callOpenAIResponses(input, options) {
+    const url = 'https://api.openai.com/v1/responses';
+    const startTime = Date.now();
+    const body = {
+        model: config_1.config.OPENAI_MODEL || 'gpt-5.1',
+        input: input
+    };
+    if (options?.reasoning) {
+        // Use 'low' effort for faster responses (was 'medium' - took 41s, 'low' should be ~10-15s)
+        body.reasoning = { effort: 'low' };
+    }
+    const inputLength = typeof input === 'string' ? input.length : JSON.stringify(input).length;
+    console.log(`🤖 [OpenAI-Recommendations] Starting request - Model: ${body.model}, Input: ${inputLength} chars`);
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config_1.config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+    });
+    const fetchTime = Date.now() - startTime;
+    if (!response.ok) {
+        const error = await response.text();
+        console.error(`❌ [OpenAI-Recommendations] Error after ${fetchTime}ms:`, error);
+        throw new Error(`OpenAI API error: ${response.statusText}`);
+    }
+    const data = await response.json();
+    const totalTime = Date.now() - startTime;
+    console.log(`✅ [OpenAI-Recommendations] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s)`);
+    // Parse new Responses API format
+    if (data.output && Array.isArray(data.output)) {
+        for (const item of data.output) {
+            if (item.type === 'message' && Array.isArray(item.content)) {
+                for (const contentItem of item.content) {
+                    if (contentItem.type === 'output_text' && contentItem.text) {
+                        console.log(`📊 [OpenAI-Recommendations] Output: ${contentItem.text.length} chars`);
+                        return contentItem.text;
+                    }
+                }
+            }
+        }
+    }
+    return '';
+}
 async function readFileText(filePath) {
     try {
         const lower = filePath.toLowerCase();
         if (lower.endsWith('.pdf')) {
-            const data = await (0, pdf_parse_1.default)(fs.readFileSync(filePath));
-            return data.text || '';
+            const buffer = fs.readFileSync(filePath);
+            // Add timeout for PDF parsing
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('PDF parsing timeout')), 10000));
+            const parsePromise = (0, pdf_parse_1.default)(buffer).then(data => data.text || '');
+            return await Promise.race([parsePromise, timeoutPromise]);
         }
         if (lower.endsWith('.docx')) {
             const result = await mammoth_1.default.extractRawText({ path: filePath });
@@ -59,33 +108,100 @@ async function readFileText(filePath) {
         // Fallback to plain text
         return fs.readFileSync(filePath, 'utf-8');
     }
-    catch {
+    catch (err) {
+        console.error('Error reading file:', err);
         return '';
     }
+}
+async function generateAIRecommendations(documentName, documentContent, folderName) {
+    // No truncation needed with gpt-5.1 - it handles full documents
+    const truncatedContent = documentContent;
+    if (!truncatedContent.trim()) {
+        return [
+            'Document content could not be extracted - please verify the file format',
+            'Consider uploading a text-based version of this document'
+        ];
+    }
+    const systemPrompt = `You are an expert regulatory compliance analyst specializing in software licensing, NOC (No Objection Certificate) applications, and regulatory documentation for fintech and virtual asset service providers.
+
+Your task is to analyze the uploaded document and provide specific, actionable recommendations for compliance and completeness.
+
+Focus on:
+1. Missing required sections or information
+2. Regulatory compliance gaps
+3. Document formatting and structure issues
+4. Clarity and completeness of statements
+5. References to applicable laws/regulations that should be included
+6. Risk areas that need attention
+7. Best practices that should be followed
+
+Provide 3-7 specific, actionable recommendations. Each recommendation should be:
+- Specific to the document content
+- Actionable (what exactly needs to be done)
+- Clear about why it matters for compliance
+
+Do NOT provide generic advice - analyze THIS specific document.`;
+    const userPrompt = `Analyze this document from folder "${folderName}" named "${documentName}":
+
+---DOCUMENT START---
+${truncatedContent}
+---DOCUMENT END---
+
+Provide your recommendations as a JSON array of strings. Example format:
+["Recommendation 1", "Recommendation 2", "Recommendation 3"]
+
+Only return the JSON array, nothing else.`;
+    try {
+        console.log(`🤖 Generating AI recommendations for: ${documentName}`);
+        const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
+        const responseText = await callOpenAIResponses(fullPrompt, { reasoning: true });
+        console.log(`✅ AI response received for: ${documentName}`);
+        // Parse JSON array from response
+        try {
+            // Handle markdown code blocks if present
+            let jsonText = responseText.trim();
+            if (jsonText.startsWith('```')) {
+                jsonText = jsonText.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+            }
+            const recommendations = JSON.parse(jsonText);
+            if (Array.isArray(recommendations) && recommendations.length > 0) {
+                return recommendations.filter((r) => typeof r === 'string' && r.trim());
+            }
+        }
+        catch (parseError) {
+            console.error('Failed to parse AI recommendations JSON:', parseError);
+            // Try to extract recommendations from text if JSON parsing fails
+            const lines = responseText.split('\n').filter(l => l.trim().startsWith('-') || l.trim().match(/^\d+\./));
+            if (lines.length > 0) {
+                return lines.map(l => l.replace(/^[-\d.)\s]+/, '').trim()).filter(l => l);
+            }
+        }
+    }
+    catch (error) {
+        console.error('OpenAI API error:', error?.message);
+    }
+    // Fallback recommendations if AI fails
+    return [
+        `Review ${documentName} for completeness and regulatory compliance`,
+        'Ensure all required sections are present and properly formatted',
+        'Verify references to applicable regulations are up to date'
+    ];
 }
 async function generateRecommendationsForUpload(applicationId, documentPath, documentName) {
     const trails = await (0, database_service_1.getRecommendationsTrail)(applicationId, documentName);
     const nextVersion = (trails[trails.length - 1]?.version || 0) + 1;
+    console.log(`📄 Processing document: ${documentName} for folder: ${applicationId}`);
     const extract = await readFileText(documentPath);
-    // Use AI categorization signals to craft recommendation points
-    let points = [];
-    try {
-        const companyName = applicationId;
-        const aiCat = await document_analyzer_service_1.documentAnalyzerService.categorizeDocumentWithAI(applicationId, companyName, documentPath, documentName);
-        points = [
-            `Ensure ${aiCat.category} - ${aiCat.subcategory} documentation complies with standards`,
-            `Add missing references or sections related to ${aiCat.category}`
-        ];
-    }
-    catch {
-        // Fallback generic suggestions
-        points = [
-            'Clarify scope and objectives',
-            'Provide references to applicable regulations',
-            'Add version and change history in the document'
-        ];
-    }
-    const recommendations = points.map(p => ({ id: (0, uuid_1.v4)(), point: p, status: 'pending', createdAt: new Date() }));
+    console.log(`📝 Extracted ${extract.length} characters from document`);
+    // Generate AI-powered recommendations based on actual file content
+    const points = await generateAIRecommendations(documentName, extract, applicationId);
+    console.log(`💡 Generated ${points.length} recommendations`);
+    const recommendations = points.map(p => ({
+        id: (0, uuid_1.v4)(),
+        point: p,
+        status: 'pending',
+        createdAt: new Date()
+    }));
     await (0, database_service_1.saveRecommendationsVersion)(applicationId, documentName, nextVersion, recommendations, extract);
     return { version: nextVersion, recommendations, extract };
 }

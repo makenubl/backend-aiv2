@@ -280,7 +280,7 @@ class ApplicationFolderService {
             },
             aiInsights,
             aiDocumentCategories: aiDocCategories,
-            modelUsed: 'gpt-4o',
+            modelUsed: 'o1',
             nextSteps,
             conditions,
             evaluatedAt: new Date()

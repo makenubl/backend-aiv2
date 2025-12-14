@@ -270,6 +270,15 @@ export const updateRecommendationStatus = async (
   );
 };
 
+export const deleteRecommendationsForDocument = async (
+  applicationId: string,
+  documentName: string
+): Promise<void> => {
+  const collection = await getRecommendationsCollection();
+  await collection.deleteMany({ applicationId, documentName });
+  console.log(`🗑️  Deleted all recommendations for: ${documentName} in ${applicationId}`);
+};
+
 export default {
   connectDatabase,
   disconnectDatabase,
@@ -286,4 +295,5 @@ export default {
   ,saveRecommendationsVersion
   ,getRecommendationsTrail
   ,updateRecommendationStatus
+  ,deleteRecommendationsForDocument
 };

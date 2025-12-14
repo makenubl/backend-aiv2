@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.getEvaluation = exports.saveEvaluation = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.connectDatabase = void 0;
+exports.deleteRecommendationsForDocument = exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.getEvaluation = exports.saveEvaluation = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.connectDatabase = void 0;
 const mongodb_1 = require("mongodb");
 let mongoClient;
 let database;
@@ -199,6 +199,12 @@ const updateRecommendationStatus = async (applicationId, documentName, version, 
     });
 };
 exports.updateRecommendationStatus = updateRecommendationStatus;
+const deleteRecommendationsForDocument = async (applicationId, documentName) => {
+    const collection = await (0, exports.getRecommendationsCollection)();
+    await collection.deleteMany({ applicationId, documentName });
+    console.log(`🗑️  Deleted all recommendations for: ${documentName} in ${applicationId}`);
+};
+exports.deleteRecommendationsForDocument = deleteRecommendationsForDocument;
 exports.default = {
     connectDatabase: exports.connectDatabase,
     disconnectDatabase: exports.disconnectDatabase,
@@ -214,6 +220,7 @@ exports.default = {
     getRecommendationsCollection: exports.getRecommendationsCollection,
     saveRecommendationsVersion: exports.saveRecommendationsVersion,
     getRecommendationsTrail: exports.getRecommendationsTrail,
-    updateRecommendationStatus: exports.updateRecommendationStatus
+    updateRecommendationStatus: exports.updateRecommendationStatus,
+    deleteRecommendationsForDocument: exports.deleteRecommendationsForDocument
 };
 //# sourceMappingURL=database.service.js.map

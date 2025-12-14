@@ -138,7 +138,7 @@ Provide specific subcategory (e.g., "Certificate of Incorporation", "AML Policy"
 Respond strictly as JSON with keys: {"category": string, "pvaraCategory": string, "subcategory": string, "confidence": number (0-1), "notes": string}.`;
         try {
             const response = await this.openai.chat.completions.create({
-                model: 'gpt-4o',
+                model: config_1.config.OPENAI_MODEL,
                 messages: [{ role: 'user', content: basePrompt }],
                 max_completion_tokens: 1000,
             });
@@ -271,7 +271,7 @@ Please provide:
 Format your response as a structured analysis.`;
         try {
             const response = await this.openai.chat.completions.create({
-                model: 'gpt-4o',
+                model: config_1.config.OPENAI_MODEL,
                 messages: [{ role: 'user', content: prompt }],
                 max_completion_tokens: 2500
             });
