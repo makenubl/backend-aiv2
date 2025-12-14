@@ -8,6 +8,12 @@ import { appendActivity, readActivities } from '../services/activity-log.service
 import { deleteRecommendationsForDocument } from '../services/database.service';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
+import * as gridfs from '../services/gridfs-storage.service';
+
+// Check if running on serverless (Vercel/Lambda - read-only filesystem)
+const isServerless = (): boolean => {
+  return !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+};
 
 // Response type for OpenAI Responses API
 interface OpenAIResponsesData {
@@ -89,7 +95,31 @@ async function callOpenAIResponses(input: string, options?: { reasoning?: boolea
 
 const router = Router();
 
-// Helper function to extract text from various file types
+// Helper function to extract text from file buffer
+async function extractTextFromBuffer(buffer: Buffer, fileName: string): Promise<string> {
+  try {
+    if (buffer.length === 0) {
+      return '[File is empty - upload may have failed. Please re-upload this document.]';
+    }
+    
+    const lower = fileName.toLowerCase();
+    if (lower.endsWith('.pdf')) {
+      const data = await pdfParse(buffer);
+      return data.text || '';
+    }
+    if (lower.endsWith('.docx')) {
+      const result = await mammoth.extractRawText({ buffer });
+      return result.value || '';
+    }
+    // Fallback to plain text
+    return buffer.toString('utf-8');
+  } catch (err) {
+    console.error('Error extracting text from buffer:', fileName, err);
+    return '[Error: Could not extract text from this document.]';
+  }
+}
+
+// Helper function to extract text from various file types (filesystem)
 async function readFileText(filePath: string): Promise<string> {
   try {
     // Check if file exists and has content
@@ -122,6 +152,23 @@ async function readFileText(filePath: string): Promise<string> {
   }
 }
 
+// Helper to get file content as text (works for both filesystem and GridFS)
+async function getFileText(folderName: string, fileName: string): Promise<string> {
+  if (isServerless()) {
+    // Use GridFS
+    const buffer = await gridfs.getFileBuffer(folderName, fileName);
+    if (!buffer) {
+      return '[File not found]';
+    }
+    return extractTextFromBuffer(buffer, fileName);
+  } else {
+    // Use filesystem
+    const { full } = resolveFolder(folderName);
+    const filePath = path.join(full, 'documents', fileName);
+    return readFileText(filePath);
+  }
+}
+
 // Base directory where application folders live
 function getApplicationsBasePath() {
   // Prefer workspace root ../applications; fallback to backend/applications
@@ -145,81 +192,130 @@ function resolveFolder(folderName: string) {
 }
 
 // Create a new application folder with standard structure
-router.post('/folders', (req, res) => {
+router.post('/folders', async (req, res) => {
   const { name } = req.body || {};
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'Folder name is required' });
   }
 
-  const { full, safeName } = resolveFolder(name);
-  if (fs.existsSync(full)) {
-    return res.status(409).json({ error: 'Folder already exists', folder: safeName });
+  try {
+    const safeName = name.replace(/[^a-zA-Z0-9-_]/g, '_');
+    const userEmail = String(req.header('x-user-email') || '');
+    const userRole = String(req.header('x-user-role') || '');
+    
+    if (isServerless()) {
+      // Use GridFS on serverless
+      await gridfs.createFolder(name, userEmail);
+      await gridfs.appendActivityLog({
+        id: `create-${safeName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'create-folder',
+        folder: safeName,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // Use filesystem locally
+      const { full } = resolveFolder(name);
+      if (fs.existsSync(full)) {
+        return res.status(409).json({ error: 'Folder already exists', folder: safeName });
+      }
+
+      fs.mkdirSync(full, { recursive: true });
+      const docsDir = path.join(full, 'documents');
+      fs.mkdirSync(docsDir, { recursive: true });
+
+      const appJson = {
+        id: safeName,
+        companyName: '',
+        submittedBy: '',
+        submitterEmail: '',
+        applicationDate: new Date().toISOString(),
+        documents: [] as string[],
+      };
+      fs.writeFileSync(path.join(full, 'application.json'), JSON.stringify(appJson, null, 2));
+
+      appendActivity(getApplicationsBasePath(), {
+        id: `create-${safeName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'create-folder',
+        folder: safeName,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return res.status(201).json({
+      message: 'Folder created',
+      folder: safeName,
+    });
+  } catch (error: any) {
+    console.error('Error creating folder:', error);
+    if (error.message === 'Folder already exists') {
+      return res.status(409).json({ error: 'Folder already exists' });
+    }
+    return res.status(500).json({ error: error.message || 'Failed to create folder' });
   }
-
-  // Create folder and subdirectories
-  fs.mkdirSync(full, { recursive: true });
-  const docsDir = path.join(full, 'documents');
-  fs.mkdirSync(docsDir, { recursive: true });
-
-  // Initialize minimal application.json
-  const appJson = {
-    id: safeName,
-    companyName: '',
-    submittedBy: '',
-    submitterEmail: '',
-    applicationDate: new Date().toISOString(),
-    documents: [] as string[],
-  };
-  fs.writeFileSync(path.join(full, 'application.json'), JSON.stringify(appJson, null, 2));
-
-  appendActivity(getApplicationsBasePath(), {
-    id: `create-${safeName}-${Date.now()}`,
-    userEmail: String(req.header('x-user-email') || ''),
-    userRole: String(req.header('x-user-role') || ''),
-    action: 'create-folder',
-    folder: safeName,
-    timestamp: new Date().toISOString(),
-  });
-
-  return res.status(201).json({
-    message: 'Folder created',
-    folder: safeName,
-    path: full,
-  });
 });
 
 // Delete a folder
-router.delete('/folders', (req, res) => {
+router.delete('/folders', async (req, res) => {
   const { folder } = req.body || {};
   if (!folder || typeof folder !== 'string') {
     return res.status(400).json({ error: 'Folder name is required' });
   }
 
-  const { full, safeName } = resolveFolder(folder);
-  if (!fs.existsSync(full)) {
-    return res.status(404).json({ error: 'Folder not found' });
+  try {
+    const safeName = folder.replace(/[^a-zA-Z0-9-_]/g, '_');
+    const userEmail = String(req.header('x-user-email') || '');
+    const userRole = String(req.header('x-user-role') || '');
+    
+    if (isServerless()) {
+      // Use GridFS on serverless
+      const deleted = await gridfs.deleteFolder(safeName);
+      if (!deleted) {
+        return res.status(404).json({ error: 'Folder not found' });
+      }
+      await gridfs.appendActivityLog({
+        id: `delete-${safeName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'delete-folder',
+        folder: safeName,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // Use filesystem locally
+      const { full } = resolveFolder(folder);
+      if (!fs.existsSync(full)) {
+        return res.status(404).json({ error: 'Folder not found' });
+      }
+
+      fs.rmSync(full, { recursive: true, force: true });
+
+      appendActivity(getApplicationsBasePath(), {
+        id: `delete-${safeName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'delete-folder',
+        folder: safeName,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return res.status(200).json({
+      message: 'Folder deleted',
+      folder: safeName
+    });
+  } catch (error: any) {
+    console.error('Error deleting folder:', error);
+    return res.status(500).json({ error: error.message || 'Failed to delete folder' });
   }
-
-  // Recursively delete folder
-  fs.rmSync(full, { recursive: true, force: true });
-
-  appendActivity(getApplicationsBasePath(), {
-    id: `delete-${safeName}-${Date.now()}`,
-    userEmail: String(req.header('x-user-email') || ''),
-    userRole: String(req.header('x-user-role') || ''),
-    action: 'delete-folder',
-    folder: safeName,
-    timestamp: new Date().toISOString(),
-  });
-
-  return res.status(200).json({
-    message: 'Folder deleted',
-    folder: safeName
-  });
 });
 
 // Multer storage configured to place files under the specified folder's documents directory
-const storage = multer.diskStorage({
+// Use memory storage for serverless (GridFS), disk storage for local
+const diskStorage = multer.diskStorage({
   destination: (req, _file, cb) => {
     const folderName = String(req.body.folder || req.query.folder || '');
     if (!folderName) return cb(new Error('Target folder is required'), '');
@@ -235,7 +331,13 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const memoryStorage = multer.memoryStorage();
+
+// Choose storage based on environment
+const upload = multer({ 
+  storage: isServerless() ? memoryStorage : diskStorage,
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+});
 
 // Upload one or multiple files to a folder
 router.post('/upload', upload.array('files', 20), async (req, res) => {
@@ -249,70 +351,131 @@ router.post('/upload', upload.array('files', 20), async (req, res) => {
     return res.status(400).json({ error: 'No files uploaded. Use field name "files".' });
   }
 
-  // Update application.json documents list if present
-  const { full } = resolveFolder(folderName);
-  const appJsonPath = path.join(full, 'application.json');
-  if (fs.existsSync(appJsonPath)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(appJsonPath, 'utf-8'));
-      const added = files.map(f => f.filename);
-      data.documents = Array.from(new Set([...(data.documents || []), ...added]));
-      fs.writeFileSync(appJsonPath, JSON.stringify(data, null, 2));
-    } catch {
-      // ignore malformed json
-    }
-  }
+  const userEmail = String(req.header('x-user-email') || '');
+  const userRole = String(req.header('x-user-role') || '');
+  const uploadedFiles: { name: string; size: number }[] = [];
 
-  // NOTE: Recommendations are now generated on-demand when chat opens (not during upload)
-  // This dramatically improves upload speed - no AI processing during upload
-  
-  appendActivity(getApplicationsBasePath(), {
-    id: `upload-${folderName}-${Date.now()}`,
-    userEmail: String(req.header('x-user-email') || ''),
-    userRole: String(req.header('x-user-role') || ''),
-    action: 'upload-files',
-    folder: folderName,
-    meta: { files: files.map(f => f.filename) },
-    timestamp: new Date().toISOString(),
-  });
-  
-  console.log(`📤 Upload complete - Files: ${files.map(f => f.filename).join(', ')} (No AI processing at upload time)`);
-  
-  return res.status(200).json({
-    message: 'Files uploaded',
-    folder: folderName,
-    files: files.map(f => ({ name: f.filename, size: f.size })),
-    recommendationsGenerated: [] // Recommendations generated on-demand via chat
-  });
+  try {
+    if (isServerless()) {
+      // Use GridFS on serverless - files are in memory (buffer)
+      for (const file of files) {
+        const safeFileName = file.originalname.replace(/[^a-zA-Z0-9-_.]/g, '_');
+        await gridfs.uploadFile(
+          folderName,
+          safeFileName,
+          file.buffer,
+          file.mimetype,
+          userEmail
+        );
+        uploadedFiles.push({ name: safeFileName, size: file.size });
+      }
+      
+      await gridfs.appendActivityLog({
+        id: `upload-${folderName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'upload-files',
+        folder: folderName,
+        meta: { files: uploadedFiles.map(f => f.name) },
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // Disk storage - files already saved to disk by multer
+      for (const file of files) {
+        uploadedFiles.push({ name: file.filename, size: file.size });
+      }
+      
+      // Update application.json documents list if present
+      const { full } = resolveFolder(folderName);
+      const appJsonPath = path.join(full, 'application.json');
+      if (fs.existsSync(appJsonPath)) {
+        try {
+          const data = JSON.parse(fs.readFileSync(appJsonPath, 'utf-8'));
+          const added = uploadedFiles.map(f => f.name);
+          data.documents = Array.from(new Set([...(data.documents || []), ...added]));
+          fs.writeFileSync(appJsonPath, JSON.stringify(data, null, 2));
+        } catch {
+          // ignore malformed json
+        }
+      }
+
+      appendActivity(getApplicationsBasePath(), {
+        id: `upload-${folderName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'upload-files',
+        folder: folderName,
+        meta: { files: uploadedFiles.map(f => f.name) },
+        timestamp: new Date().toISOString(),
+      });
+    }
+    
+    console.log(`📤 Upload complete - Files: ${uploadedFiles.map(f => f.name).join(', ')} (No AI processing at upload time)`);
+    
+    return res.status(200).json({
+      message: 'Files uploaded',
+      folder: folderName,
+      files: uploadedFiles,
+      recommendationsGenerated: [] // Recommendations generated on-demand via chat
+    });
+  } catch (error: any) {
+    console.error('Error uploading files:', error);
+    return res.status(500).json({ error: error.message || 'Failed to upload files' });
+  }
 });
 
 // List folders
-router.get('/folders', (_req, res) => {
-  const base = getApplicationsBasePath();
-  const entries = fs.readdirSync(base, { withFileTypes: true });
-  const folders = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => e.name);
-  res.json({ folders });
+router.get('/folders', async (_req, res) => {
+  try {
+    if (isServerless()) {
+      // Use GridFS on serverless
+      const folders = await gridfs.listFolders();
+      res.json({ folders: folders.map(f => f.safeName) });
+    } else {
+      // Use filesystem locally
+      const base = getApplicationsBasePath();
+      const entries = fs.readdirSync(base, { withFileTypes: true });
+      const folders = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => e.name);
+      res.json({ folders });
+    }
+  } catch (error: any) {
+    console.error('Error listing folders:', error);
+    res.status(500).json({ error: error.message || 'Failed to list folders' });
+  }
 });
 
 // List files in a folder
-router.get('/files', (req, res) => {
+router.get('/files', async (req, res) => {
   const folderName = String(req.query.folder || '');
   if (!folderName) {
     res.status(400).json({ error: 'Folder is required' });
     return;
   }
-  const { full } = resolveFolder(folderName);
-  const docsDir = path.join(full, 'documents');
-  if (!fs.existsSync(docsDir)) {
-    res.json({ files: [] });
-    return;
+  
+  try {
+    if (isServerless()) {
+      // Use GridFS on serverless
+      const files = await gridfs.listFiles(folderName);
+      res.json({ files: files.map(f => f.fileName) });
+    } else {
+      // Use filesystem locally
+      const { full } = resolveFolder(folderName);
+      const docsDir = path.join(full, 'documents');
+      if (!fs.existsSync(docsDir)) {
+        res.json({ files: [] });
+        return;
+      }
+      const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
+      res.json({ files });
+    }
+  } catch (error: any) {
+    console.error('Error listing files:', error);
+    res.status(500).json({ error: error.message || 'Failed to list files' });
   }
-  const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
-  res.json({ files });
 });
 
 // Download a file from a folder
-router.get('/download', (req, res) => {
+router.get('/download', async (req, res) => {
   const folderName = String(req.query.folder || '');
   const fileName = String(req.query.file || '');
   
@@ -321,15 +484,33 @@ router.get('/download', (req, res) => {
     return;
   }
   
-  const { full } = resolveFolder(folderName);
-  const filePath = path.join(full, 'documents', fileName);
-  
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: 'File not found' });
-    return;
+  try {
+    if (isServerless()) {
+      // Use GridFS on serverless
+      const fileData = await gridfs.getFile(folderName, fileName);
+      if (!fileData) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+      }
+      res.setHeader('Content-Type', fileData.metadata.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      res.send(fileData.buffer);
+    } else {
+      // Use filesystem locally
+      const { full } = resolveFolder(folderName);
+      const filePath = path.join(full, 'documents', fileName);
+      
+      if (!fs.existsSync(filePath)) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+      }
+      
+      res.download(filePath, fileName);
+    }
+  } catch (error: any) {
+    console.error('Error downloading file:', error);
+    res.status(500).json({ error: error.message || 'Failed to download file' });
   }
-  
-  res.download(filePath, fileName);
 });
 
 // Delete a file from a folder
@@ -339,32 +520,57 @@ router.delete('/files', async (req, res) => {
     res.status(400).json({ error: 'folder and fileName are required' });
     return;
   }
-  const { full } = resolveFolder(String(folder));
-  const filePath = path.join(full, 'documents', String(fileName));
-  
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: 'File not found' });
-    return;
-  }
   
   try {
-    // Delete the file
-    fs.unlinkSync(filePath);
+    if (isServerless()) {
+      // Use GridFS on serverless
+      const deleted = await gridfs.deleteFile(String(folder), String(fileName));
+      if (!deleted) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+      }
+    } else {
+      // Use filesystem locally
+      const { full } = resolveFolder(String(folder));
+      const filePath = path.join(full, 'documents', String(fileName));
+      
+      if (!fs.existsSync(filePath)) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+      }
+      
+      fs.unlinkSync(filePath);
+    }
     
     // Delete associated recommendations from MongoDB
     await deleteRecommendationsForDocument(String(folder), String(fileName));
     
-    appendActivity(getApplicationsBasePath(), {
-      id: `delete-file-${folder}-${Date.now()}`,
-      userEmail: String(req.header('x-user-email') || ''),
-      userRole: String(req.header('x-user-role') || ''),
-      action: 'delete-file',
-      folder: String(folder),
-      meta: { fileName: String(fileName) },
-      timestamp: new Date().toISOString(),
-    });
+    // Log activity
+    if (isServerless()) {
+      await gridfs.appendActivityLog({
+        id: `delete-file-${folder}-${Date.now()}`,
+        userEmail: String(req.header('x-user-email') || ''),
+        userRole: String(req.header('x-user-role') || ''),
+        action: 'delete-file',
+        folder: String(folder),
+        meta: { fileName: String(fileName) },
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      appendActivity(getApplicationsBasePath(), {
+        id: `delete-file-${folder}-${Date.now()}`,
+        userEmail: String(req.header('x-user-email') || ''),
+        userRole: String(req.header('x-user-role') || ''),
+        action: 'delete-file',
+        folder: String(folder),
+        meta: { fileName: String(fileName) },
+        timestamp: new Date().toISOString(),
+      });
+    }
+    
     res.json({ message: 'File deleted successfully' });
   } catch (e: any) {
+    console.error('Error deleting file:', e);
     res.status(500).json({ error: e?.message || 'Failed to delete file' });
   }
 });
@@ -489,22 +695,16 @@ router.post('/chat', async (req, res) => {
         }))
       }));
       
-      // If a document is specified, read its content
+      // If a document is specified, read its content (works with both filesystem and GridFS)
       let documentContent = '';
       if (document) {
         console.log(`📖 Reading document content for: ${document}`);
-        const { full } = resolveFolder(String(folder));
-        const docPath = path.join(full, 'documents', String(document));
-        console.log(`📂 Document path: ${docPath}`);
-        if (fs.existsSync(docPath)) {
-          documentContent = await readFileText(docPath);
-          console.log(`✅ Extracted ${documentContent.length} characters from document`);
-          if (!documentContent.trim()) {
+        documentContent = await getFileText(String(folder), String(document));
+        console.log(`✅ Extracted ${documentContent.length} characters from document`);
+        if (!documentContent.trim() || documentContent.startsWith('[')) {
+          if (!documentContent.startsWith('[')) {
             documentContent = '[Document content could not be extracted or is empty]';
           }
-          // No truncation - gpt-5.1 handles full documents
-        } else {
-          console.log(`❌ Document file not found at: ${docPath}`);
         }
       } else {
         console.log(`ℹ️ No document specified in chat request`);
@@ -561,16 +761,22 @@ Keep responses concise and helpful. Use emojis sparingly to make responses frien
       }
     }
     
-    appendActivity(getApplicationsBasePath(), {
+    // Log activity
+    const activityData = {
       id: `chat-${folder}-${Date.now()}`,
       userEmail: String(req.header('x-user-email') || ''),
       userRole,
       action: 'chat',
       folder: String(folder),
-      document: document ? String(document) : undefined,
-      meta: { message, applied, reply: reply.substring(0, 100) },
+      meta: { message, applied, reply: reply.substring(0, 100), document: document ? String(document) : undefined },
       timestamp: new Date().toISOString(),
-    });
+    };
+    
+    if (isServerless()) {
+      await gridfs.appendActivityLog(activityData);
+    } else {
+      appendActivity(getApplicationsBasePath(), { ...activityData, document: document ? String(document) : undefined });
+    }
     
     res.json({ reply, applied });
   } catch (e: any) {
@@ -596,19 +802,17 @@ router.post('/apply-changes', async (req, res) => {
   const startTime = Date.now();
   
   try {
-    const { full } = resolveFolder(String(folder));
-    const originalFilePath = path.join(full, 'documents', String(document));
+    console.log(`📝 Applying ${recommendations.length} changes to: ${folder}/${document}`);
     
-    console.log(`📝 Applying ${recommendations.length} changes to: ${originalFilePath}`);
+    // Read original file content (works with both filesystem and GridFS)
+    const originalContent = await getFileText(String(folder), String(document));
     
-    if (!fs.existsSync(originalFilePath)) {
-      console.error(`❌ File not found: ${originalFilePath}`);
+    if (originalContent.startsWith('[File not found]') || originalContent.startsWith('[Error')) {
+      console.error(`❌ File not found or error: ${folder}/${document}`);
       res.status(404).json({ error: 'Original file not found' });
       return;
     }
     
-    // Read original file content (supports docx, pdf, txt)
-    const originalContent = await readFileText(originalFilePath);
     console.log(`📖 Read ${originalContent.length} characters from original document`);
     
     // Prepare recommendations summary
@@ -646,13 +850,27 @@ Return the complete updated document with all recommendations applied. Start dir
     const processTime = Date.now() - startTime;
     console.log(`✅ Document generated in ${processTime}ms (${(processTime/1000).toFixed(1)}s)`);
     
-    // Create new versioned file (don't overwrite original)
+    // Create new versioned file
     const baseName = path.basename(String(document), path.extname(String(document)));
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-    const newFileName = `${baseName}_updated_${timestamp}.txt`; // Save as .txt to preserve content
-    const newFilePath = path.join(full, 'documents', newFileName);
+    const newFileName = `${baseName}_updated_${timestamp}.txt`;
     
-    fs.writeFileSync(newFilePath, updatedContent, 'utf-8');
+    if (isServerless()) {
+      // Save to GridFS
+      await gridfs.uploadFile(
+        String(folder),
+        newFileName,
+        Buffer.from(updatedContent, 'utf-8'),
+        'text/plain',
+        String(req.header('x-user-email') || '')
+      );
+    } else {
+      // Save to filesystem
+      const { full } = resolveFolder(String(folder));
+      const newFilePath = path.join(full, 'documents', newFileName);
+      fs.writeFileSync(newFilePath, updatedContent, 'utf-8');
+    }
+    
     console.log(`💾 Saved updated document: ${newFileName}`);
     
     // Mark all recommendations as accepted in the database
@@ -685,12 +903,24 @@ Return the complete updated document with all recommendations applied. Start dir
 });
 
 // Activity log endpoint for UI visibility
-router.get('/activity', (req, res) => {
-  const folderName = String(req.query.folder || '');
-  const base = getApplicationsBasePath();
-  const all = readActivities(base);
-  const filtered = folderName ? all.filter(a => a.folder === folderName) : all;
-  res.json({ activities: filtered });
+router.get('/activity', async (req, res) => {
+  try {
+    const folderName = String(req.query.folder || '');
+    
+    if (isServerless()) {
+      const all = await gridfs.getActivityLogs();
+      const filtered = folderName ? all.filter(a => a.folder === folderName) : all;
+      res.json({ activities: filtered });
+    } else {
+      const base = getApplicationsBasePath();
+      const all = readActivities(base);
+      const filtered = folderName ? all.filter(a => a.folder === folderName) : all;
+      res.json({ activities: filtered });
+    }
+  } catch (error: any) {
+    console.error('Error fetching activities:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch activities' });
+  }
 });
 
 export default router;
