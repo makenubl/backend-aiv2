@@ -1,8 +1,15 @@
 import { Router, Request, Response } from 'express';
 import { applicationFolderService } from '../services/application-folder.service';
 import { documentAnalyzerService } from '../services/document-analyzer.service';
+import { requirePermission, requireEvaluator, getPermissionsHandler } from '../middleware/role.middleware';
 
 const router = Router();
+
+/**
+ * GET /api/applications/permissions
+ * Get current user's permissions based on role
+ */
+router.get('/permissions', getPermissionsHandler);
 
 /**
  * GET /api/applications/scan
@@ -87,8 +94,9 @@ router.get('/documents/library', async (_req: Request, res: Response) => {
  * Perform comprehensive evaluation of application
  * Query params:
  *   - refresh=true: Force re-evaluation with GPT-5.1 (clears cache)
+ * Requires: evaluator or admin role
  */
-router.get('/:id/evaluate', async (req: Request, res: Response) => {
+router.get('/:id/evaluate', requirePermission('evaluation:trigger'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const refresh = req.query.refresh === 'true';
@@ -117,8 +125,9 @@ router.get('/:id/evaluate', async (req: Request, res: Response) => {
 /**
  * POST /api/applications/refresh-all
  * Clear all evaluation caches to force GPT-5.1 re-evaluation
+ * Requires: evaluator or admin role
  */
-router.post('/refresh-all', async (req: Request, res: Response) => {
+router.post('/refresh-all', requirePermission('evaluation:refresh'), async (req: Request, res: Response) => {
   try {
     await applicationFolderService.clearEvaluationCache();
     res.json({

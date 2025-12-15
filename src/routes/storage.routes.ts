@@ -9,6 +9,7 @@ import { deleteRecommendationsForDocument } from '../services/database.service';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
 import * as gridfs from '../services/gridfs-storage.service';
+import { requirePermission, getUserRole } from '../middleware/role.middleware';
 
 // Check if running on serverless (Vercel/Lambda - read-only filesystem)
 const isServerless = (): boolean => {
@@ -192,7 +193,8 @@ function resolveFolder(folderName: string) {
 }
 
 // Create a new application folder with standard structure
-router.post('/folders', async (req, res) => {
+// Requires: storage:upload permission (admin or evaluator)
+router.post('/folders', requirePermission('storage:upload'), async (req, res) => {
   const { name } = req.body || {};
   if (!name || typeof name !== 'string') {
     return res.status(400).json({ error: 'Folder name is required' });
@@ -259,7 +261,8 @@ router.post('/folders', async (req, res) => {
 });
 
 // Delete a folder
-router.delete('/folders', async (req, res) => {
+// Requires: storage:delete permission (admin only)
+router.delete('/folders', requirePermission('storage:delete'), async (req, res) => {
   const { folder } = req.body || {};
   if (!folder || typeof folder !== 'string') {
     return res.status(400).json({ error: 'Folder name is required' });
@@ -340,7 +343,8 @@ const upload = multer({
 });
 
 // Upload one or multiple files to a folder
-router.post('/upload', upload.array('files', 20), async (req, res) => {
+// Requires: storage:upload permission (admin or evaluator)
+router.post('/upload', requirePermission('storage:upload'), upload.array('files', 20), async (req, res) => {
   const folderName = String(req.body.folder || req.query.folder || '');
   if (!folderName) {
     return res.status(400).json({ error: 'Target folder is required' });
@@ -514,7 +518,8 @@ router.get('/download', async (req, res) => {
 });
 
 // Delete a file from a folder
-router.delete('/files', async (req, res) => {
+// Requires: storage:delete permission (admin only)
+router.delete('/files', requirePermission('storage:delete'), async (req, res) => {
   const { folder, fileName } = req.body || {};
   if (!folder || !fileName) {
     res.status(400).json({ error: 'folder and fileName are required' });
@@ -604,14 +609,11 @@ router.get('/recommendations', async (req, res) => {
 });
 
 // Accept or reject recommendations by IDs on a specific version
-router.post('/recommendations/decision', async (req, res) => {
+// Requires: recommendations:modify permission (admin or evaluator)
+router.post('/recommendations/decision', requirePermission('recommendations:modify'), async (req, res) => {
   const { folder, document, version, acceptIds, rejectIds } = req.body || {};
-  const userRole = String(req.header('x-user-role') || '');
-  // Simple role enforcement: only owner/editor can modify recommendations
-  if (!userRole || !['owner', 'editor'].includes(userRole)) {
-    res.status(403).json({ error: 'Insufficient role to modify recommendations' });
-    return;
-  }
+  const userRole = getUserRole(req);
+  
   if (!folder || !document || typeof version !== 'number') {
     res.status(400).json({ error: 'folder, document, and numeric version are required' });
     return;
