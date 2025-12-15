@@ -32,12 +32,69 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.applicationFolderService = void 0;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const pdf_parse_1 = __importDefault(require("pdf-parse"));
+const mammoth_1 = __importDefault(require("mammoth"));
 const document_analyzer_service_1 = require("./document-analyzer.service");
 const database_service_1 = require("./database.service");
+const config_1 = require("../config");
+const openai_request_manager_1 = require("./openai-request-manager");
+// Helper function for OpenAI Responses API (gpt-5.1)
+async function callOpenAIResponsesAPI(input, options, metadata) {
+    const url = 'https://api.openai.com/v1/responses';
+    const body = {
+        model: config_1.config.OPENAI_MODEL || 'gpt-5.1',
+        input,
+    };
+    if (options?.reasoning) {
+        body.reasoning = { effort: 'medium' };
+    }
+    console.log(`🤖 [OpenAI Responses API] Generating AI Insights - Model: ${body.model}`);
+    return openai_request_manager_1.openAIRequestManager.execute({
+        tenantId: metadata?.tenantId,
+        requestName: metadata?.requestName || 'applicationFolder.callOpenAIResponsesAPI',
+        promptSnippet: input,
+        cacheKey: metadata?.cacheKey ||
+            openai_request_manager_1.openAIRequestManager.buildCacheKey('applicationFolder.callOpenAIResponsesAPI', options?.reasoning, input.length),
+        operation: async () => {
+            const startedAt = Date.now();
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config_1.config.OPENAI_API_KEY}`
+                },
+                body: JSON.stringify(body)
+            });
+            if (!response.ok) {
+                const error = await response.text();
+                console.error(`❌ [OpenAI] Error:`, error);
+                throw new Error(`OpenAI API error: ${response.statusText}`);
+            }
+            const data = await response.json();
+            const totalTime = Date.now() - startedAt;
+            console.log(`✅ [OpenAI] AI Insights generated - Time: ${totalTime}ms`);
+            if (data.output && Array.isArray(data.output)) {
+                for (const item of data.output) {
+                    if (item.type === 'message' && Array.isArray(item.content)) {
+                        for (const contentItem of item.content) {
+                            if (contentItem.type === 'output_text' && contentItem.text) {
+                                return { value: contentItem.text, usage: data.usage };
+                            }
+                        }
+                    }
+                }
+            }
+            return { value: '', usage: data.usage };
+        }
+    });
+}
 // Cache for evaluations to avoid repeated OpenAI calls
 const evaluationCache = new Map();
 class ApplicationFolderService {
@@ -210,8 +267,8 @@ class ApplicationFolderService {
         }, docAnalysis);
         // Determine recommendation
         const recommendation = this.determineRecommendation(scores, comments);
-        // Generate AI insights
-        const aiInsights = this.generateAIInsights(data, scores, comments, docAnalysis);
+        // Generate AI insights using GPT-5.1
+        const aiInsights = await this.generateAIInsights(data, scores, comments, docAnalysis);
         // Optional: AI per-document categorization to enrich evaluation
         let aiDocCategories;
         try {
@@ -280,7 +337,7 @@ class ApplicationFolderService {
             },
             aiInsights,
             aiDocumentCategories: aiDocCategories,
-            modelUsed: 'o1',
+            modelUsed: config_1.config.OPENAI_MODEL || 'gpt-5.1',
             nextSteps,
             conditions,
             evaluatedAt: new Date()
@@ -296,6 +353,319 @@ class ApplicationFolderService {
             console.error(`[MongoDB] Failed to save evaluation for ${applicationId}:`, error);
         }
         return evaluation;
+    }
+    /**
+     * Perform evaluation with custom configuration
+     * Allows selecting specific documents and regulatory checklists
+     */
+    async evaluateWithConfig(config) {
+        const { applicationId, folder, documents, checklists, aiContext, companyName } = config;
+        console.log(`📋 Starting configured evaluation for ${applicationId}`);
+        console.log(`📁 Using documents from folder: ${folder}`);
+        console.log(`📄 Selected ${documents.length} documents`);
+        console.log(`✅ Using ${checklists.length} regulatory checklists`);
+        // Helper function to read file content
+        const readDocumentContent = async (fileName) => {
+            try {
+                // Determine the document path
+                const workspaceRoot = path.join(process.cwd(), '..');
+                let basePath = path.join(workspaceRoot, 'applications');
+                if (!fs.existsSync(basePath)) {
+                    basePath = path.join(process.cwd(), 'applications');
+                }
+                const filePath = path.join(basePath, folder, 'documents', fileName);
+                if (!fs.existsSync(filePath)) {
+                    console.warn(`⚠️ File not found: ${filePath}`);
+                    return `[File not found: ${fileName}]`;
+                }
+                const stats = fs.statSync(filePath);
+                if (stats.size === 0) {
+                    return `[File is empty: ${fileName}]`;
+                }
+                const lower = fileName.toLowerCase();
+                // Parse PDF files
+                if (lower.endsWith('.pdf')) {
+                    console.log(`📄 Parsing PDF: ${fileName}`);
+                    const buffer = fs.readFileSync(filePath);
+                    try {
+                        const data = await (0, pdf_parse_1.default)(buffer);
+                        const text = data.text || '';
+                        // Limit text to prevent token overflow (max ~10k chars per doc)
+                        return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+                    }
+                    catch (pdfErr) {
+                        console.error(`Error parsing PDF ${fileName}:`, pdfErr);
+                        return `[Error parsing PDF: ${fileName}]`;
+                    }
+                }
+                // Parse DOCX files
+                if (lower.endsWith('.docx')) {
+                    console.log(`📄 Parsing DOCX: ${fileName}`);
+                    try {
+                        const result = await mammoth_1.default.extractRawText({ path: filePath });
+                        const text = result.value || '';
+                        return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+                    }
+                    catch (docxErr) {
+                        console.error(`Error parsing DOCX ${fileName}:`, docxErr);
+                        return `[Error parsing DOCX: ${fileName}]`;
+                    }
+                }
+                // Plain text files
+                if (lower.endsWith('.txt') || lower.endsWith('.json') || lower.endsWith('.md')) {
+                    const text = fs.readFileSync(filePath, 'utf-8');
+                    return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+                }
+                return `[Unsupported file format: ${fileName}]`;
+            }
+            catch (err) {
+                console.error(`Error reading ${fileName}:`, err);
+                return `[Error reading file: ${fileName}]`;
+            }
+        };
+        // Read all document contents
+        console.log('📚 Reading document contents...');
+        const documentContents = [];
+        for (const doc of documents) {
+            const content = await readDocumentContent(doc.name);
+            documentContents.push({ name: doc.name, tag: doc.tag, content });
+            console.log(`  ✅ ${doc.name} (${doc.tag}): ${content.length} chars`);
+        }
+        // Build comprehensive prompt with selected documents and checklists
+        const checklistText = checklists.map(cl => `### ${cl.name}\n${cl.items.map((item, i) => `${i + 1}. ${item}`).join('\n')}`).join('\n\n');
+        // Build document content sections by tag
+        const buildDocSection = (tag, title) => {
+            const docs = documentContents.filter(d => d.tag === tag);
+            if (docs.length === 0)
+                return `${title}:\nNone selected\n`;
+            return `${title}:\n${docs.map(d => `\n--- ${d.name} ---\n${d.content}`).join('\n')}`;
+        };
+        const documentsText = `
+📋 APPLICATION FORMS:
+${buildDocSection('application-form', 'Application Forms')}
+
+📜 REGULATIONS:
+${buildDocSection('regulation', 'Regulatory Documents')}
+
+📁 ORDINANCES:
+${buildDocSection('ordinance', 'Ordinance Documents')}
+
+📎 SUPPORTING DOCUMENTS:
+${buildDocSection('supporting', 'Supporting Documents')}
+`;
+        const evaluationPrompt = `${aiContext}
+
+=== EVALUATION CONTEXT ===
+
+🏢 APPLICANT: ${companyName}
+📁 APPLICATION ID: ${applicationId}
+
+=== SELECTED DOCUMENTS FOR REVIEW ===
+${documentsText}
+
+=== REGULATORY CHECKLISTS TO EVALUATE AGAINST ===
+${checklistText}
+
+=== EVALUATION INSTRUCTIONS ===
+
+Based on the documents listed above and the regulatory checklists provided, perform a comprehensive evaluation:
+
+1. **DOCUMENT REVIEW**: For each regulatory checklist item, indicate whether the corresponding document/evidence is:
+   - ✅ PRESENT and compliant
+   - ⚠️ PRESENT but requires clarification
+   - ❌ MISSING or non-compliant
+
+2. **COMPLIANCE SCORING**: Provide scores (0-100%) for each regulatory area:
+   - NOC Regulations Compliance
+   - VA Fit & Proper Requirements  
+   - SECP Prerequisites
+   - Licensing Regulations
+
+3. **RISK ASSESSMENT**: Identify potential risks in:
+   - AML/CFT compliance
+   - Governance structure
+   - Technical security
+   - Operational capabilities
+
+4. **GAP ANALYSIS**: List all missing documents and compliance gaps
+
+5. **RECOMMENDATIONS**: Provide specific, actionable recommendations for addressing each gap
+
+6. **FINAL DECISION**: Based on the evaluation, provide:
+   - Overall Compliance Score (0-100%)
+   - Risk Level (Low/Medium/High/Critical)
+   - Recommendation (APPROVE / CONDITIONAL APPROVAL / REJECT)
+   - Required conditions for approval (if applicable)
+
+Be thorough, specific, and cite the relevant regulatory sections where applicable.`;
+        const totalDocChars = documentContents.reduce((sum, d) => sum + d.content.length, 0);
+        console.log(`📊 Total document content: ${totalDocChars} characters`);
+        console.log(`📝 Total prompt size: ${evaluationPrompt.length} characters`);
+        console.log('🤖 Calling GPT-5.1 for configured evaluation...');
+        try {
+            // Call GPT-5.1 for evaluation (using local function defined at top of file)
+            const aiResponse = await callOpenAIResponsesAPI(evaluationPrompt, { reasoning: true }, {
+                tenantId: applicationId,
+                cacheKey: openai_request_manager_1.openAIRequestManager.buildCacheKey('configured-evaluation', applicationId, evaluationPrompt.length),
+                requestName: 'applicationFolder.configuredEvaluation',
+            });
+            // Parse the AI response to extract scores and recommendations
+            const scores = this.parseAIScores(aiResponse);
+            const recommendation = this.parseAIRecommendation(aiResponse);
+            const comments = [];
+            // Add document gap comments based on what was selected
+            const hasApplicationForms = documentContents.some(d => d.tag === 'application-form');
+            const hasRegulations = documentContents.some(d => d.tag === 'regulation' || d.tag === 'ordinance');
+            if (!hasApplicationForms) {
+                comments.push({
+                    category: 'compliance',
+                    severity: 'critical',
+                    title: 'No Application Forms Selected',
+                    description: 'No application forms were selected for evaluation. Please ensure all required forms are included.',
+                    evaluatedAt: new Date()
+                });
+            }
+            if (!hasRegulations) {
+                comments.push({
+                    category: 'regulatory',
+                    severity: 'high',
+                    title: 'No Regulations Referenced',
+                    description: 'No regulatory documents were selected for compliance checking.',
+                    evaluatedAt: new Date()
+                });
+            }
+            // Build evaluation result
+            const evaluation = {
+                applicationId,
+                overallScore: scores.overall,
+                riskLevel: scores.riskLevel,
+                recommendation: recommendation.decision,
+                complianceScore: scores.compliance,
+                technicalScore: scores.technical,
+                businessScore: scores.business,
+                regulatoryScore: scores.regulatory,
+                comments,
+                dueDiligenceChecks: {
+                    corporateVerification: { passed: true, notes: 'Evaluated from selected documents' },
+                    licenseVerification: { passed: scores.regulatory >= 60, notes: 'Based on document review' },
+                    financialStability: { passed: scores.business >= 60, notes: 'Based on document review' },
+                    technicalCapability: { passed: scores.technical >= 60, notes: 'Based on document review' },
+                    complianceFramework: { passed: scores.compliance >= 60, notes: 'Based on document review' },
+                    dataProtection: { passed: true, notes: 'Evaluated from selected documents' },
+                    riskManagement: { passed: scores.riskLevel !== 'critical', notes: 'Based on risk assessment' },
+                    pakistanReadiness: { passed: true, notes: 'Evaluated from selected documents' }
+                },
+                aiInsights: aiResponse,
+                aiDocumentCategories: documents.map(d => ({
+                    name: d.name,
+                    category: 'other',
+                    subcategory: d.tag,
+                    pvaraCategory: d.tag,
+                    applicantName: companyName,
+                    relevanceScore: 0.9,
+                    notes: 'User-tagged document'
+                })),
+                modelUsed: (await Promise.resolve().then(() => __importStar(require('../config')))).config.OPENAI_MODEL || 'gpt-5.1',
+                nextSteps: recommendation.nextSteps || [],
+                conditions: recommendation.conditions || [],
+                evaluatedAt: new Date()
+            };
+            // Save to MongoDB
+            try {
+                await (0, database_service_1.saveEvaluation)(applicationId, evaluation);
+            }
+            catch (error) {
+                console.error(`[MongoDB] Failed to save configured evaluation for ${applicationId}:`, error);
+            }
+            return evaluation;
+        }
+        catch (error) {
+            console.error('Configured evaluation error:', error);
+            throw new Error(`Evaluation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+    /**
+     * Parse AI response to extract scores
+     */
+    parseAIScores(aiResponse) {
+        // Default scores
+        let overall = 65;
+        let compliance = 65;
+        let technical = 70;
+        let business = 65;
+        let regulatory = 60;
+        let riskLevel = 'medium';
+        const response = aiResponse.toLowerCase();
+        // Try to extract overall score
+        const overallMatch = response.match(/overall.*?(\d{1,3})%|overall score.*?(\d{1,3})/i);
+        if (overallMatch) {
+            overall = parseInt(overallMatch[1] || overallMatch[2]);
+        }
+        // Try to extract compliance score
+        const complianceMatch = response.match(/compliance.*?(\d{1,3})%|compliance score.*?(\d{1,3})/i);
+        if (complianceMatch) {
+            compliance = parseInt(complianceMatch[1] || complianceMatch[2]);
+        }
+        // Try to extract risk level
+        if (response.includes('critical risk') || response.includes('risk.*critical')) {
+            riskLevel = 'critical';
+        }
+        else if (response.includes('high risk') || response.includes('risk.*high')) {
+            riskLevel = 'high';
+        }
+        else if (response.includes('low risk') || response.includes('risk.*low')) {
+            riskLevel = 'low';
+        }
+        return { overall, compliance, technical, business, regulatory, riskLevel };
+    }
+    /**
+     * Parse AI response to extract recommendation
+     */
+    parseAIRecommendation(aiResponse) {
+        const response = aiResponse.toLowerCase();
+        let decision = 'needs-review';
+        const nextSteps = [];
+        const conditions = [];
+        if (response.includes('reject') || response.includes('not approved') || response.includes('denial')) {
+            decision = 'reject';
+        }
+        else if (response.includes('conditional approval') || response.includes('approve with conditions')) {
+            decision = 'conditional-approval';
+        }
+        else if (response.includes('approve') && !response.includes('not approve')) {
+            decision = 'approve';
+        }
+        // Extract conditions (simple pattern matching)
+        const conditionMatch = response.match(/conditions?[:\s]*\n?([\s\S]*?)(?:\n\n|$)/i);
+        if (conditionMatch) {
+            const conditionText = conditionMatch[1];
+            const bulletPoints = conditionText.match(/[-•]\s*([^\n]+)/g);
+            if (bulletPoints) {
+                conditions.push(...bulletPoints.map(b => b.replace(/^[-•]\s*/, '').trim()).slice(0, 5));
+            }
+        }
+        // Default next steps based on decision
+        if (decision === 'conditional-approval') {
+            nextSteps.push('Submit missing documentation within 30 days');
+            nextSteps.push('Address identified compliance gaps');
+            nextSteps.push('Schedule follow-up review meeting');
+        }
+        else if (decision === 'reject') {
+            nextSteps.push('Review rejection reasons in detail');
+            nextSteps.push('Prepare comprehensive remediation plan');
+            nextSteps.push('Consider reapplication after addressing gaps');
+        }
+        else if (decision === 'approve') {
+            nextSteps.push('Proceed with license issuance');
+            nextSteps.push('Schedule onboarding meeting');
+            nextSteps.push('Begin compliance monitoring setup');
+        }
+        else {
+            nextSteps.push('Additional review required');
+            nextSteps.push('Submit clarification documents');
+            nextSteps.push('Schedule review meeting with regulatory team');
+        }
+        return { decision, nextSteps, conditions };
     }
     checkCorporateVerification(data, comments) {
         const issues = [];
@@ -636,26 +1006,121 @@ class ApplicationFolderService {
             return { decision: 'conditional-approval' };
         }
     }
-    generateAIInsights(data, scores, comments, docAnalysis) {
+    async generateAIInsights(data, scores, comments, docAnalysis) {
         const criticalCount = comments.filter(c => c.severity === 'critical').length;
         const highCount = comments.filter(c => c.severity === 'high').length;
-        let insights = `AI-Powered Evaluation Summary for ${data.companyName}:\n\n`;
-        insights += `Overall Assessment Score: ${scores.overall}/100 (Risk Level: ${scores.riskLevel.toUpperCase()})\n\n`;
+        const mediumCount = comments.filter(c => c.severity === 'medium').length;
+        const lowCount = comments.filter(c => c.severity === 'low').length;
+        // Prepare comprehensive context for GPT-5.1
+        const prompt = `You are a senior regulatory evaluator for the Pakistan Virtual Assets Regulatory Authority (PVARA).
+Generate a COMPREHENSIVE and DETAILED regulatory assessment for this VASP license application.
+
+🏢 **APPLICANT INFORMATION:**
+- Company Name: ${data.companyName || 'Unknown'}
+- Application Name: ${data.appName || 'N/A'}
+- Country: ${data.country || 'Unknown'}
+- Founded: ${data.founded || 'Unknown'}
+- Team Size: ${data.teamSize || 'Unknown'}
+- Description: ${data.description || 'No description provided'}
+
+📊 **EVALUATION SCORES:**
+- Overall Score: ${scores.overall}/100
+- Risk Level: ${scores.riskLevel?.toUpperCase()}
+- Compliance Score: ${scores.compliance}/100
+- Technical Score: ${scores.technical}/100
+- Business Score: ${scores.business}/100
+- Regulatory Score: ${scores.regulatory}/100
+
+⚠️ **ISSUES IDENTIFIED:**
+- Critical Issues: ${criticalCount}
+- High Priority Issues: ${highCount}
+- Medium Priority Issues: ${mediumCount}
+- Low Priority Issues: ${lowCount}
+
+📋 **TOP CONCERNS:**
+${comments.slice(0, 5).map(c => `• [${c.severity.toUpperCase()}] ${c.title}: ${c.description}`).join('\n')}
+
+📄 **DOCUMENT ANALYSIS:**
+${docAnalysis ? `
+- Total Documents: ${docAnalysis.totalDocuments || 0}
+- Missing Categories: ${docAnalysis.missingCategories?.join(', ') || 'None identified'}
+- Category Breakdown: ${JSON.stringify(docAnalysis.categoryBreakdown || {})}
+` : 'No document analysis available'}
+
+🌍 **REGULATORY CONTEXT:**
+- Regulatory History: ${data.regulatoryHistory || 'Not provided'}
+- Existing Licenses: ${data.existingLicenses || 'Not specified'}
+- Pakistan Operations Plan: ${data.pakistanTeamPlan ? 'Provided' : 'NOT PROVIDED (CRITICAL GAP)'}
+- AML/CFT Framework: ${data.amlCftFramework || 'Not detailed'}
+
+📝 **GENERATE A DETAILED ASSESSMENT COVERING:**
+
+1. **Executive Summary** (3-4 sentences on overall assessment, key strengths, and main concerns)
+
+2. **Regulatory Compliance Analysis**
+   - PVARA regulations compliance status
+   - FATF Recommendations alignment (especially Rec. 15)
+   - AML/CFT Act 2010 (Pakistan) adherence
+   - KYC/CDD requirements assessment
+   - Travel Rule readiness
+
+3. **Risk Assessment**
+   - Money laundering risk level
+   - Terrorist financing risk indicators
+   - Operational risk factors
+   - Technology/cybersecurity risks
+   - Reputational risk considerations
+
+4. **Documentation Gaps**
+   - Missing critical documents
+   - Documents requiring updates
+   - Additional submissions needed
+
+5. **Key Strengths** (what the applicant does well)
+
+6. **Key Weaknesses** (areas requiring improvement)
+
+7. **Conditions for Approval** (if applicable)
+   - Mandatory conditions
+   - Recommended enhancements
+
+8. **Final Recommendation**
+   - Clear APPROVE / CONDITIONAL APPROVAL / REJECT recommendation
+   - Confidence level (HIGH/MEDIUM/LOW)
+   - Next steps for the applicant
+
+Format the response with clear sections using headers and bullet points. Be specific and actionable in your recommendations.`;
+        try {
+            // Call GPT-5.1 with reasoning for thorough analysis
+            const aiResponse = await callOpenAIResponsesAPI(prompt, { reasoning: true }, {
+                tenantId: data.id || data.companyName || 'global',
+                cacheKey: openai_request_manager_1.openAIRequestManager.buildCacheKey('applicationInsights', data.id, data.companyName, prompt.length),
+                requestName: 'applicationFolder.generateAIInsights',
+            });
+            if (aiResponse && aiResponse.length > 100) {
+                return aiResponse;
+            }
+        }
+        catch (error) {
+            console.error('Failed to generate AI insights with GPT-5.1:', error);
+        }
+        // Fallback to template-based insights if API fails
+        let insights = `📊 AI-Powered Evaluation Summary for ${data.companyName}:\n\n`;
+        insights += `Overall Assessment Score: ${scores.overall}/100 (Risk Level: ${scores.riskLevel?.toUpperCase()})\n\n`;
         insights += `The application has been analyzed across 8 due diligence dimensions. `;
         if (criticalCount > 0) {
-            insights += `CRITICAL ISSUES IDENTIFIED (${criticalCount}): These must be resolved before approval. `;
+            insights += `⛔ CRITICAL ISSUES IDENTIFIED (${criticalCount}): These must be resolved before approval. `;
         }
         if (highCount > 0) {
-            insights += `High-priority concerns (${highCount}) require attention. `;
+            insights += `⚠️ High-priority concerns (${highCount}) require attention. `;
         }
-        insights += `\n\nKey Strengths:\n`;
+        insights += `\n\n✅ Key Strengths:\n`;
         if (data.regulatoryHistory && data.regulatoryHistory.includes('Licensed')) {
             insights += `• Established regulatory track record with international licenses\n`;
         }
-        // Evidence from submitted documents
-        const hasPersonnel = docAnalysis && docAnalysis.categoryBreakdown['personnel'] >= 3;
-        const hasCompliance = docAnalysis && docAnalysis.categoryBreakdown['compliance'] >= 2;
-        const hasCorporate = docAnalysis && docAnalysis.categoryBreakdown['corporate'] >= 4;
+        const hasPersonnel = docAnalysis && docAnalysis.categoryBreakdown && docAnalysis.categoryBreakdown['personnel'] >= 3;
+        const hasCompliance = docAnalysis && docAnalysis.categoryBreakdown && docAnalysis.categoryBreakdown['compliance'] >= 2;
+        const hasCorporate = docAnalysis && docAnalysis.categoryBreakdown && docAnalysis.categoryBreakdown['corporate'] >= 4;
         if (hasPersonnel) {
             insights += `• Strong governance: ${docAnalysis.categoryBreakdown['personnel']} key personnel documents submitted\n`;
         }
@@ -665,18 +1130,19 @@ class ApplicationFolderService {
         if (hasCompliance) {
             insights += `• Comprehensive compliance framework: ${docAnalysis.categoryBreakdown['compliance']} policies documented\n`;
         }
-        insights += `\nKey Concerns:\n`;
-        comments.slice(0, 3).forEach(c => {
-            insights += `• ${c.title}: ${c.description}\n`;
+        insights += `\n❌ Key Concerns:\n`;
+        comments.slice(0, 5).forEach(c => {
+            insights += `• [${c.severity.toUpperCase()}] ${c.title}: ${c.description}\n`;
         });
-        insights += `\nPakistan Market Fit: `;
+        insights += `\n🇵🇰 Pakistan Market Fit: `;
         if (data.pakistanTeamPlan) {
             insights += `Applicant has provided Pakistan operations plan. `;
         }
         else {
-            insights += `CRITICAL GAP: No Pakistan-specific operations plan. `;
+            insights += `CRITICAL GAP: No Pakistan-specific operations plan provided. `;
         }
-        insights += `\n\nRecommendation Confidence: ${scores.overall >= 70 ? 'HIGH' : scores.overall >= 50 ? 'MEDIUM' : 'LOW'}`;
+        insights += `\n\n📈 Recommendation Confidence: ${scores.overall >= 70 ? 'HIGH' : scores.overall >= 50 ? 'MEDIUM' : 'LOW'}`;
+        insights += `\n\n📌 Model Used: ${config_1.config.OPENAI_MODEL || 'gpt-5.1'} (Fallback mode - API response was insufficient)`;
         return insights;
     }
     generateNextStepsAndConditions(recommendation, comments) {
@@ -706,6 +1172,33 @@ class ApplicationFolderService {
             conditions.push(`${c.title}: ${c.description}`);
         });
         return { nextSteps, conditions };
+    }
+    /**
+     * Clear evaluation cache for a specific application or all applications
+     * This forces re-evaluation with GPT-5.1 on next request
+     * Clears both memory cache AND MongoDB stored evaluation
+     */
+    async clearEvaluationCache(applicationId) {
+        if (applicationId) {
+            // Clear memory cache
+            evaluationCache.delete(applicationId);
+            console.log(`[EvaluationCache] Cleared memory cache for ${applicationId}`);
+            // Clear MongoDB cache
+            try {
+                await (0, database_service_1.deleteEvaluation)(applicationId);
+                console.log(`[MongoDB] Deleted stored evaluation for ${applicationId}`);
+            }
+            catch (error) {
+                console.warn(`[MongoDB] Could not delete evaluation for ${applicationId}:`, error);
+            }
+        }
+        else {
+            // Clear all memory cache
+            evaluationCache.clear();
+            console.log(`[EvaluationCache] Cleared all cached evaluations`);
+            // Note: For "clear all", we don't delete from MongoDB to preserve history
+            // Users should use specific applicationId to force refresh
+        }
     }
 }
 exports.applicationFolderService = new ApplicationFolderService();

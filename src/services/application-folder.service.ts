@@ -5,6 +5,7 @@ import mammoth from 'mammoth';
 import { documentAnalyzerService, DocumentAnalysis, DocumentCategory } from './document-analyzer.service';
 import { saveEvaluation, getEvaluation, deleteEvaluation } from './database.service';
 import { config } from '../config';
+import { openAIRequestManager, TokenUsage } from './openai-request-manager';
 
 // Response type for OpenAI Responses API
 interface OpenAIResponsesData {
@@ -17,16 +18,19 @@ interface OpenAIResponsesData {
     }>;
   }>;
   error?: { message: string };
+  usage?: TokenUsage;
 }
 
 // Helper function for OpenAI Responses API (gpt-5.1)
-async function callOpenAIResponsesAPI(input: string, options?: { reasoning?: boolean }): Promise<string> {
+async function callOpenAIResponsesAPI(
+  input: string,
+  options?: { reasoning?: boolean },
+  metadata?: { tenantId?: string; cacheKey?: string; requestName?: string }
+): Promise<string> {
   const url = 'https://api.openai.com/v1/responses';
-  const startTime = Date.now();
-  
   const body: any = {
     model: config.OPENAI_MODEL || 'gpt-5.1',
-    input: input
+    input,
   };
 
   if (options?.reasoning) {
@@ -35,44 +39,53 @@ async function callOpenAIResponsesAPI(input: string, options?: { reasoning?: boo
 
   console.log(`🤖 [OpenAI Responses API] Generating AI Insights - Model: ${body.model}`);
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.OPENAI_API_KEY}`
-      },
-      body: JSON.stringify(body)
-    });
+  return openAIRequestManager.execute<string>({
+    tenantId: metadata?.tenantId,
+    requestName: metadata?.requestName || 'applicationFolder.callOpenAIResponsesAPI',
+    promptSnippet: input,
+    cacheKey:
+      metadata?.cacheKey ||
+      openAIRequestManager.buildCacheKey(
+        'applicationFolder.callOpenAIResponsesAPI',
+        options?.reasoning,
+        input.length
+      ),
+    operation: async () => {
+      const startedAt = Date.now();
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+      });
 
-    if (!response.ok) {
-      const error = await response.text();
-      console.error(`❌ [OpenAI] Error:`, error);
-      throw new Error(`OpenAI API error: ${response.statusText}`);
-    }
+      if (!response.ok) {
+        const error = await response.text();
+        console.error(`❌ [OpenAI] Error:`, error);
+        throw new Error(`OpenAI API error: ${response.statusText}`);
+      }
 
-    const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
-    const totalTime = Date.now() - startTime;
-    console.log(`✅ [OpenAI] AI Insights generated - Time: ${totalTime}ms`);
-    
-    // Parse Responses API format
-    if (data.output && Array.isArray(data.output)) {
-      for (const item of data.output) {
-        if (item.type === 'message' && Array.isArray(item.content)) {
-          for (const contentItem of item.content) {
-            if (contentItem.type === 'output_text' && contentItem.text) {
-              return contentItem.text;
+      const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
+      const totalTime = Date.now() - startedAt;
+      console.log(`✅ [OpenAI] AI Insights generated - Time: ${totalTime}ms`);
+
+      if (data.output && Array.isArray(data.output)) {
+        for (const item of data.output) {
+          if (item.type === 'message' && Array.isArray(item.content)) {
+            for (const contentItem of item.content) {
+              if (contentItem.type === 'output_text' && contentItem.text) {
+                return { value: contentItem.text, usage: data.usage };
+              }
             }
           }
         }
       }
+
+      return { value: '', usage: data.usage };
     }
-    
-    return '';
-  } catch (error) {
-    console.error(`❌ [OpenAI] Failed to generate insights:`, error);
-    return '';
-  }
+  });
 }
 
 export interface ApplicationFolder {
@@ -440,7 +453,7 @@ class ApplicationFolderService {
     aiContext: string;
     companyName: string;
   }): Promise<ComprehensiveEvaluation> {
-    const { applicationId, folder, documents, documentsByTag, checklists, aiContext, companyName } = config;
+    const { applicationId, folder, documents, checklists, aiContext, companyName } = config;
     
     console.log(`📋 Starting configured evaluation for ${applicationId}`);
     console.log(`📁 Using documents from folder: ${folder}`);
@@ -600,7 +613,19 @@ Be thorough, specific, and cite the relevant regulatory sections where applicabl
     
     try {
       // Call GPT-5.1 for evaluation (using local function defined at top of file)
-      const aiResponse = await callOpenAIResponsesAPI(evaluationPrompt, { reasoning: true });
+      const aiResponse = await callOpenAIResponsesAPI(
+        evaluationPrompt,
+        { reasoning: true },
+        {
+          tenantId: applicationId,
+          cacheKey: openAIRequestManager.buildCacheKey(
+            'configured-evaluation',
+            applicationId,
+            evaluationPrompt.length
+          ),
+          requestName: 'applicationFolder.configuredEvaluation',
+        }
+      );
 
       // Parse the AI response to extract scores and recommendations
       const scores = this.parseAIScores(aiResponse);
@@ -1244,7 +1269,20 @@ Format the response with clear sections using headers and bullet points. Be spec
 
     try {
       // Call GPT-5.1 with reasoning for thorough analysis
-      const aiResponse = await callOpenAIResponsesAPI(prompt, { reasoning: true });
+      const aiResponse = await callOpenAIResponsesAPI(
+        prompt,
+        { reasoning: true },
+        {
+          tenantId: data.id || data.companyName || 'global',
+          cacheKey: openAIRequestManager.buildCacheKey(
+            'applicationInsights',
+            data.id,
+            data.companyName,
+            prompt.length
+          ),
+          requestName: 'applicationFolder.generateAIInsights',
+        }
+      );
       
       if (aiResponse && aiResponse.length > 100) {
         return aiResponse;

@@ -13,6 +13,7 @@ const evaluation_routes_1 = __importDefault(require("./routes/evaluation.routes"
 const applications_routes_1 = __importDefault(require("./routes/applications.routes"));
 const auth_routes_1 = __importDefault(require("./routes/auth.routes"));
 const storage_routes_1 = __importDefault(require("./routes/storage.routes"));
+const users_routes_1 = __importDefault(require("./routes/users.routes"));
 const app = (0, express_1.default)();
 // Middleware
 // Allow configured origins and any localhost/127.0.0.1 port in development
@@ -47,6 +48,7 @@ app.use(auth_middleware_1.apiKeyMiddleware);
 app.use('/api/evaluation', evaluation_routes_1.default);
 app.use('/api/applications', applications_routes_1.default);
 app.use('/api/storage', storage_routes_1.default);
+app.use('/api/users', users_routes_1.default);
 // Health check
 app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date() });

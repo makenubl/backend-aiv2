@@ -147,6 +147,13 @@ export const seedDefaultUsers = async (): Promise<void> => {
 
   const defaultUsers: Omit<User, '_id'>[] = [
     {
+      username: 'superadmin',
+      email: 'superadmin@pvara.gov.pk',
+      password: 'super123',
+      name: 'Super Administrator',
+      role: 'super-admin'
+    },
+    {
       username: 'admin@pvara.gov.pk',
       email: 'admin@pvara.gov.pk',
       password: 'pvara@ai',

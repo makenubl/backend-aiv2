@@ -1,5 +1,6 @@
 import { OpenAI } from 'openai';
 import { config } from '../config';
+import { openAIRequestManager, TokenUsage } from './openai-request-manager';
 import {
   NOCApplication,
   ComplianceResult,
@@ -54,57 +55,126 @@ interface OpenAIResponsesData {
     }>;
   }>;
   error?: { message: string };
+  usage?: TokenUsage;
 }
 
 // Helper function for new OpenAI Responses API (gpt-5.1)
-async function callOpenAIResponsesAPI(input: string, options?: { reasoning?: boolean }): Promise<string> {
+async function callOpenAIResponsesAPI(
+  input: string,
+  options?: { reasoning?: boolean },
+  metadata?: { tenantId?: string; cacheKey?: string; requestName?: string }
+): Promise<string> {
   const url = 'https://api.openai.com/v1/responses';
-  const startTime = Date.now();
-  
   const body: any = {
     model: config.OPENAI_MODEL || 'gpt-5.1',
-    input: input
+    input,
   };
 
   if (options?.reasoning) {
-    body.reasoning = { effort: 'medium' }; // Use medium effort for balanced speed/quality
+    body.reasoning = { effort: 'medium' };
   }
 
   console.log(`🤖 [OpenAI Responses API] Starting request - Model: ${body.model}, Reasoning: ${options?.reasoning || false}`);
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify(body)
-  });
+  return openAIRequestManager.execute<string>({
+    tenantId: metadata?.tenantId,
+    requestName: metadata?.requestName || 'evaluation.callOpenAIResponsesAPI',
+    promptSnippet: input,
+    cacheKey:
+      metadata?.cacheKey ||
+      openAIRequestManager.buildCacheKey(
+        'evaluation.callOpenAIResponsesAPI',
+        input.length,
+        options?.reasoning
+      ),
+    operation: async () => {
+      const startedAt = Date.now();
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+      });
 
-  if (!response.ok) {
-    const error = await response.text();
-    console.error(`❌ [OpenAI] Error:`, error);
-    throw new Error(`OpenAI API error: ${response.statusText}`);
-  }
+      if (!response.ok) {
+        const error = await response.text();
+        console.error(`❌ [OpenAI] Error:`, error);
+        throw new Error(`OpenAI API error: ${response.statusText}`);
+      }
 
-  const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
-  const totalTime = Date.now() - startTime;
-  console.log(`✅ [OpenAI] Response received - Time: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
-  
-  // Parse Responses API format
-  if (data.output && Array.isArray(data.output)) {
-    for (const item of data.output) {
-      if (item.type === 'message' && Array.isArray(item.content)) {
-        for (const contentItem of item.content) {
-          if (contentItem.type === 'output_text' && contentItem.text) {
-            return contentItem.text;
+      const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
+      const totalTime = Date.now() - startedAt;
+      console.log(`✅ [OpenAI] Response received - Time: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
+      
+      if (data.output && Array.isArray(data.output)) {
+        for (const item of data.output) {
+          if (item.type === 'message' && Array.isArray(item.content)) {
+            for (const contentItem of item.content) {
+              if (contentItem.type === 'output_text' && contentItem.text) {
+                return { value: contentItem.text, usage: data.usage };
+              }
+            }
           }
         }
       }
+      
+      return { value: '', usage: data.usage };
     }
-  }
-  
-  return '';
+  });
+}
+
+interface ChatResult {
+  content: string;
+  usage?: TokenUsage;
+}
+
+interface ChatCompletionOptions {
+  prompt: string;
+  tenantId: string;
+  operation: string;
+  maxTokens?: number;
+  cacheKey?: string;
+}
+
+async function runTrackedChatCompletion(options: ChatCompletionOptions): Promise<ChatResult> {
+  return openAIRequestManager.execute<ChatResult>({
+    tenantId: options.tenantId,
+    requestName: options.operation,
+    promptSnippet: options.prompt,
+    cacheKey:
+      options.cacheKey ||
+      openAIRequestManager.buildCacheKey(
+        options.operation,
+        options.tenantId,
+        options.prompt.length,
+        options.maxTokens
+      ),
+    operation: async () => {
+      const message = await openai.chat.completions.create({
+        model: config.OPENAI_MODEL,
+        messages: [{ role: 'user', content: options.prompt }],
+        max_completion_tokens: options.maxTokens ?? config.OPENAI_MAX_TOKENS,
+      });
+
+      const usage: TokenUsage | undefined = message.usage
+        ? {
+            input_tokens: message.usage.prompt_tokens,
+            output_tokens: message.usage.completion_tokens,
+            total_tokens: message.usage.total_tokens,
+          }
+        : undefined;
+
+      return {
+        value: {
+          content: message.choices[0].message.content || '',
+          usage,
+        },
+        usage,
+      };
+    }
+  });
 }
 
 export class EvaluationService {
@@ -218,7 +288,19 @@ Be thorough, specific, and cite relevant Pakistani regulations where applicable.
 
     try {
       // Use OpenAI Responses API with reasoning for thorough analysis
-      const responseText = await callOpenAIResponsesAPI(prompt, { reasoning: true });
+      const responseText = await callOpenAIResponsesAPI(
+        prompt,
+        { reasoning: true },
+        {
+          tenantId: application.id,
+          cacheKey: openAIRequestManager.buildCacheKey(
+            'evaluation.singleCall',
+            application.id,
+            context.length
+          ),
+          requestName: 'evaluation.singleCall',
+        }
+      );
       
       const duration = Date.now() - startTime;
       logLLMCall('evaluateApplicationSingleCall', config.OPENAI_MODEL, undefined, duration);
@@ -306,17 +388,18 @@ Provide a JSON response with:
   "recommendations": [string]
 }`;
 
-    const message = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      max_completion_tokens: config.OPENAI_MAX_TOKENS,
+    const chatResult = await runTrackedChatCompletion({
+      prompt,
+      tenantId: application.id,
+      operation: 'evaluation.assessCompliance',
+      maxTokens: config.OPENAI_MAX_TOKENS,
     });
 
     const duration = Date.now() - startTime;
-    logLLMCall('assessCompliance', config.OPENAI_MODEL, message.usage?.total_tokens, duration);
+    logLLMCall('assessCompliance', config.OPENAI_MODEL, chatResult.usage?.total_tokens, duration);
 
     try {
-      const content = message.choices[0].message.content || '{}';
+      const content = chatResult.content || '{}';
       const result = JSON.parse(content);
       console.log(`   ✓ Compliance Score: ${result.score}/100 | Issues: ${result.issues?.length || 0}`);
       return result;
@@ -359,17 +442,18 @@ Provide a JSON response with:
   "mitigations": [string]
 }`;
 
-    const message = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      max_completion_tokens: config.OPENAI_MAX_TOKENS,
+    const chatResult = await runTrackedChatCompletion({
+      prompt,
+      tenantId: application.id,
+      operation: 'evaluation.assessRisk',
+      maxTokens: config.OPENAI_MAX_TOKENS,
     });
 
     const duration = Date.now() - startTime;
-    logLLMCall('assessRisk', config.OPENAI_MODEL, message.usage?.total_tokens, duration);
+    logLLMCall('assessRisk', config.OPENAI_MODEL, chatResult.usage?.total_tokens, duration);
 
     try {
-      const content = message.choices[0].message.content || '{}';
+      const content = chatResult.content || '{}';
       const result = JSON.parse(content);
       const calculatedLevel = determineRiskLevel(result.riskScore);
       result.riskLevel = calculatedLevel; // Override with calculated risk level
@@ -404,16 +488,17 @@ Risk Level: ${risk.riskLevel}
 Critical Issues: ${compliance.issues.filter(i => i.severity === 'critical').length}
 Key Threats: ${risk.threats.slice(0, 2).map(t => t.type).join(', ')}`;
 
-    const message = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      max_completion_tokens: config.OPENAI_MAX_TOKENS,
+    const chatResult = await runTrackedChatCompletion({
+      prompt,
+      tenantId: application.id,
+      operation: 'evaluation.generateSummary',
+      maxTokens: config.OPENAI_MAX_TOKENS,
     });
 
     const duration = Date.now() - startTime;
-    logLLMCall('generateSummary', config.OPENAI_MODEL, message.usage?.total_tokens, duration);
+    logLLMCall('generateSummary', config.OPENAI_MODEL, chatResult.usage?.total_tokens, duration);
 
-    return message.choices[0].message.content || 'Evaluation completed.';
+    return chatResult.content || 'Evaluation completed.';
   }
 
   async processVoiceQuery(query: string, applicationId: string): Promise<string> {
@@ -426,26 +511,36 @@ Application ID: ${applicationId}
 
 Provide a helpful, concise response that can be read aloud.`;
 
-    const message = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      max_completion_tokens: 1500,
+    const chatResult = await runTrackedChatCompletion({
+      prompt,
+      tenantId: applicationId,
+      operation: 'evaluation.processVoiceQuery',
+      maxTokens: 1500,
     });
 
     const duration = Date.now() - startTime;
-    logLLMCall('processVoiceQuery', config.OPENAI_MODEL, message.usage?.total_tokens, duration);
+    logLLMCall('processVoiceQuery', config.OPENAI_MODEL, chatResult.usage?.total_tokens, duration);
 
-    return message.choices[0].message.content || 'I could not process your question.';
+    return chatResult.content || 'I could not process your question.';
   }
 
   async generateTextToSpeech(text: string): Promise<Buffer> {
-    const speech = await openai.audio.speech.create({
-      model: 'tts-1',
-      voice: 'nova',
-      input: text,
-    });
+    return openAIRequestManager.execute<Buffer>({
+      tenantId: 'tts',
+      requestName: 'evaluation.generateTextToSpeech',
+      promptSnippet: text,
+      cacheKey: openAIRequestManager.buildCacheKey('evaluation.tts', text),
+      operation: async () => {
+        const speech = await openai.audio.speech.create({
+          model: 'tts-1',
+          voice: 'nova',
+          input: text,
+        });
 
-    return Buffer.from(await speech.arrayBuffer());
+        const buffer = Buffer.from(await speech.arrayBuffer());
+        return { value: buffer };
+      }
+    });
   }
 }
 

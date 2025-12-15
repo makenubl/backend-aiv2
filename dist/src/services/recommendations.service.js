@@ -42,54 +42,61 @@ exports.listRecommendations = listRecommendations;
 const fs = __importStar(require("fs"));
 const uuid_1 = require("uuid");
 const config_1 = require("../config");
+const openai_request_manager_1 = require("./openai-request-manager");
 const database_service_1 = require("./database.service");
 const pdf_parse_1 = __importDefault(require("pdf-parse"));
 const mammoth_1 = __importDefault(require("mammoth"));
 // Use new OpenAI Responses API (gpt-5.1)
-async function callOpenAIResponses(input, options) {
+async function callOpenAIResponses(input, options, metadata) {
     const url = 'https://api.openai.com/v1/responses';
-    const startTime = Date.now();
     const body = {
         model: config_1.config.OPENAI_MODEL || 'gpt-5.1',
-        input: input
+        input,
     };
     if (options?.reasoning) {
-        // Use 'low' effort for faster responses (was 'medium' - took 41s, 'low' should be ~10-15s)
         body.reasoning = { effort: 'low' };
     }
     const inputLength = typeof input === 'string' ? input.length : JSON.stringify(input).length;
     console.log(`🤖 [OpenAI-Recommendations] Starting request - Model: ${body.model}, Input: ${inputLength} chars`);
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config_1.config.OPENAI_API_KEY}`
-        },
-        body: JSON.stringify(body)
-    });
-    const fetchTime = Date.now() - startTime;
-    if (!response.ok) {
-        const error = await response.text();
-        console.error(`❌ [OpenAI-Recommendations] Error after ${fetchTime}ms:`, error);
-        throw new Error(`OpenAI API error: ${response.statusText}`);
-    }
-    const data = await response.json();
-    const totalTime = Date.now() - startTime;
-    console.log(`✅ [OpenAI-Recommendations] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s)`);
-    // Parse new Responses API format
-    if (data.output && Array.isArray(data.output)) {
-        for (const item of data.output) {
-            if (item.type === 'message' && Array.isArray(item.content)) {
-                for (const contentItem of item.content) {
-                    if (contentItem.type === 'output_text' && contentItem.text) {
-                        console.log(`📊 [OpenAI-Recommendations] Output: ${contentItem.text.length} chars`);
-                        return contentItem.text;
+    return openai_request_manager_1.openAIRequestManager.execute({
+        tenantId: metadata?.tenantId,
+        requestName: metadata?.requestName || 'recommendations.callOpenAIResponses',
+        promptSnippet: input,
+        cacheKey: metadata?.cacheKey ||
+            openai_request_manager_1.openAIRequestManager.buildCacheKey('recommendations.callOpenAIResponses', input.length, options?.reasoning),
+        operation: async () => {
+            const startedAt = Date.now();
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config_1.config.OPENAI_API_KEY}`
+                },
+                body: JSON.stringify(body)
+            });
+            if (!response.ok) {
+                const error = await response.text();
+                console.error(`❌ [OpenAI-Recommendations] Error after ${Date.now() - startedAt}ms:`, error);
+                throw new Error(`OpenAI API error: ${response.statusText}`);
+            }
+            const data = await response.json();
+            const totalTime = Date.now() - startedAt;
+            console.log(`✅ [OpenAI-Recommendations] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s)`);
+            if (data.output && Array.isArray(data.output)) {
+                for (const item of data.output) {
+                    if (item.type === 'message' && Array.isArray(item.content)) {
+                        for (const contentItem of item.content) {
+                            if (contentItem.type === 'output_text' && contentItem.text) {
+                                console.log(`📊 [OpenAI-Recommendations] Output: ${contentItem.text.length} chars`);
+                                return { value: contentItem.text, usage: data.usage };
+                            }
+                        }
                     }
                 }
             }
+            return { value: '', usage: data.usage };
         }
-    }
-    return '';
+    });
 }
 async function readFileText(filePath) {
     try {
@@ -154,7 +161,11 @@ Only return the JSON array, nothing else.`;
     try {
         console.log(`🤖 Generating AI recommendations for: ${documentName}`);
         const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
-        const responseText = await callOpenAIResponses(fullPrompt, { reasoning: true });
+        const responseText = await callOpenAIResponses(fullPrompt, { reasoning: true }, {
+            tenantId: folderName,
+            cacheKey: openai_request_manager_1.openAIRequestManager.buildCacheKey('recommendations.generateAI', folderName, documentName, truncatedContent.length),
+            requestName: 'recommendations.generateAI',
+        });
         console.log(`✅ AI response received for: ${documentName}`);
         // Parse JSON array from response
         try {

@@ -85,6 +85,34 @@ declare class ApplicationFolderService {
      * Results are stored in MongoDB and cached in memory
      */
     evaluateApplication(applicationId: string): Promise<ComprehensiveEvaluation>;
+    /**
+     * Perform evaluation with custom configuration
+     * Allows selecting specific documents and regulatory checklists
+     */
+    evaluateWithConfig(config: {
+        applicationId: string;
+        folder: string;
+        documents: Array<{
+            name: string;
+            tag: string;
+        }>;
+        documentsByTag: Record<string, string[]>;
+        checklists: Array<{
+            id: string;
+            name: string;
+            items: string[];
+        }>;
+        aiContext: string;
+        companyName: string;
+    }): Promise<ComprehensiveEvaluation>;
+    /**
+     * Parse AI response to extract scores
+     */
+    private parseAIScores;
+    /**
+     * Parse AI response to extract recommendation
+     */
+    private parseAIRecommendation;
     private checkCorporateVerification;
     private checkLicenseVerification;
     private checkFinancialStability;
@@ -98,6 +126,12 @@ declare class ApplicationFolderService {
     private determineRecommendation;
     private generateAIInsights;
     private generateNextStepsAndConditions;
+    /**
+     * Clear evaluation cache for a specific application or all applications
+     * This forces re-evaluation with GPT-5.1 on next request
+     * Clears both memory cache AND MongoDB stored evaluation
+     */
+    clearEvaluationCache(applicationId?: string): Promise<void>;
 }
 export declare const applicationFolderService: ApplicationFolderService;
 export {};

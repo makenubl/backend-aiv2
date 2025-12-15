@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteRecommendationsForDocument = exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.getEvaluation = exports.saveEvaluation = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.connectDatabase = void 0;
+exports.deleteRecommendationsForDocument = exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.deleteEvaluation = exports.getEvaluation = exports.saveEvaluation = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.deleteUser = exports.updateUser = exports.getAllUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.connectDatabase = void 0;
 const mongodb_1 = require("mongodb");
 let mongoClient;
 let database;
@@ -70,6 +70,27 @@ const createUser = async (user) => {
     };
 };
 exports.createUser = createUser;
+const getAllUsers = async () => {
+    const collection = (0, exports.getUsersCollection)();
+    return await collection.find({}).toArray();
+};
+exports.getAllUsers = getAllUsers;
+const updateUser = async (username, updates) => {
+    const collection = (0, exports.getUsersCollection)();
+    const result = await collection.findOneAndUpdate({ username }, { $set: { ...updates, updatedAt: new Date() } }, { returnDocument: 'after' });
+    return result;
+};
+exports.updateUser = updateUser;
+const deleteUser = async (username) => {
+    const collection = (0, exports.getUsersCollection)();
+    // Prevent deleting the main admin
+    if (username === 'admin@pvara.gov.pk') {
+        throw new Error('Cannot delete the primary admin account');
+    }
+    const result = await collection.deleteOne({ username });
+    return result.deletedCount > 0;
+};
+exports.deleteUser = deleteUser;
 const seedDefaultUsers = async () => {
     const collection = (0, exports.getUsersCollection)();
     const count = await collection.countDocuments();
@@ -156,6 +177,16 @@ const getEvaluation = async (applicationId) => {
     return doc?.evaluation || null;
 };
 exports.getEvaluation = getEvaluation;
+const deleteEvaluation = async (applicationId) => {
+    const collection = (0, exports.getEvaluationsCollection)();
+    const result = await collection.deleteOne({ applicationId });
+    if (result.deletedCount > 0) {
+        console.log(`🗑️ Deleted evaluation from MongoDB for ${applicationId}`);
+        return true;
+    }
+    return false;
+};
+exports.deleteEvaluation = deleteEvaluation;
 const getAllEvaluations = async () => {
     const collection = (0, exports.getEvaluationsCollection)();
     return await collection.find({}).toArray();
@@ -216,6 +247,7 @@ exports.default = {
     getEvaluationsCollection: exports.getEvaluationsCollection,
     saveEvaluation: exports.saveEvaluation,
     getEvaluation: exports.getEvaluation,
+    deleteEvaluation: exports.deleteEvaluation,
     getAllEvaluations: exports.getAllEvaluations,
     getRecommendationsCollection: exports.getRecommendationsCollection,
     saveRecommendationsVersion: exports.saveRecommendationsVersion,

@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { config } from '../config';
 import { listRecommendations, acceptOrRejectRecommendations } from '../services/recommendations.service';
+import { openAIRequestManager, TokenUsage } from '../services/openai-request-manager';
 import { appendActivity, readActivities } from '../services/activity-log.service';
 import { deleteRecommendationsForDocument } from '../services/database.service';
 import pdfParse from 'pdf-parse';
@@ -31,20 +32,22 @@ interface OpenAIResponsesData {
       content?: string;
     };
   }>;
+  usage?: TokenUsage;
 }
 
 // Helper function for new OpenAI Responses API (gpt-5.1)
-async function callOpenAIResponses(input: string, options?: { reasoning?: boolean; webSearch?: boolean }): Promise<string> {
+async function callOpenAIResponses(
+  input: string,
+  options?: { reasoning?: boolean; webSearch?: boolean },
+  metadata?: { tenantId?: string; cacheKey?: string; requestName?: string }
+): Promise<string> {
   const url = 'https://api.openai.com/v1/responses';
-  const startTime = Date.now();
-  
   const body: any = {
     model: config.OPENAI_MODEL || 'gpt-5.1',
-    input: input
+    input,
   };
 
   if (options?.reasoning) {
-    // Use 'low' effort for faster responses (was 'high' - took 28s, 'low' should be ~5-8s)
     body.reasoning = { effort: 'low' };
   }
 
@@ -55,43 +58,56 @@ async function callOpenAIResponses(input: string, options?: { reasoning?: boolea
   const inputLength = typeof input === 'string' ? input.length : JSON.stringify(input).length;
   console.log(`🤖 [OpenAI] Starting request - Model: ${body.model}, Input: ${inputLength} chars, Reasoning: ${options?.reasoning || false}`);
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify(body)
-  });
+  return openAIRequestManager.execute<string>({
+    tenantId: metadata?.tenantId,
+    requestName: metadata?.requestName || 'storage.callOpenAIResponses',
+    promptSnippet: input,
+    cacheKey:
+      metadata?.cacheKey ||
+      openAIRequestManager.buildCacheKey(
+        'storage.callOpenAIResponses',
+        input.length,
+        options?.reasoning,
+        options?.webSearch
+      ),
+    operation: async () => {
+      const startedAt = Date.now();
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+      });
 
-  const fetchTime = Date.now() - startTime;
+      if (!response.ok) {
+        const error = await response.text();
+        console.error(`❌ [OpenAI] Error after ${Date.now() - startedAt}ms:`, error);
+        throw new Error(`OpenAI API error: ${response.statusText}`);
+      }
 
-  if (!response.ok) {
-    const error = await response.text();
-    console.error(`❌ [OpenAI] Error after ${fetchTime}ms:`, error);
-    throw new Error(`OpenAI API error: ${response.statusText}`);
-  }
-
-  const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
-  const totalTime = Date.now() - startTime;
-  console.log(`✅ [OpenAI] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
-  
-  // Parse new Responses API format: { output: [{ type: "message", content: [{ type: "output_text", text: "..." }] }] }
-  if (data.output && Array.isArray(data.output)) {
-    for (const item of data.output) {
-      if (item.type === 'message' && Array.isArray(item.content)) {
-        for (const contentItem of item.content) {
-          if (contentItem.type === 'output_text' && contentItem.text) {
-            console.log(`📊 [OpenAI] Output: ${contentItem.text.length} chars`);
-            return contentItem.text;
+      const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
+      const totalTime = Date.now() - startedAt;
+      console.log(`✅ [OpenAI] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
+      
+      if (data.output && Array.isArray(data.output)) {
+        for (const item of data.output) {
+          if (item.type === 'message' && Array.isArray(item.content)) {
+            for (const contentItem of item.content) {
+              if (contentItem.type === 'output_text' && contentItem.text) {
+                console.log(`📊 [OpenAI] Output: ${contentItem.text.length} chars`);
+                return { value: contentItem.text, usage: data.usage };
+              }
+            }
           }
         }
       }
+      
+      const fallback = data.choices?.[0]?.message?.content || '';
+      return { value: fallback, usage: data.usage };
     }
-  }
-  
-  // Fallback for legacy format
-  return data.choices?.[0]?.message?.content || '';
+  });
 }
 
 const router = Router();
@@ -767,7 +783,21 @@ Be thorough but concise. Act as a supportive auditor helping the applicant achie
         
         // Use new Responses API - reasoning only for complex questions
         const fullInput = `${systemPrompt}\n\nUser Question: ${message}`;
-        reply = await callOpenAIResponses(fullInput, { reasoning: useReasoning });
+        reply = await callOpenAIResponses(
+          fullInput,
+          { reasoning: useReasoning },
+          {
+            tenantId: String(folder || config.OPENAI_DEFAULT_TENANT_ID),
+            cacheKey: openAIRequestManager.buildCacheKey(
+              'storage.chat',
+              folder,
+              document,
+              normalized,
+              useReasoning
+            ),
+            requestName: 'storage.chat',
+          }
+        );
       } catch (aiError: any) {
         console.error('OpenAI chat error:', aiError?.message);
         // Fallback to basic responses
@@ -867,7 +897,21 @@ Return the complete updated document with all recommendations applied. Start dir
 
     console.log(`🤖 Sending to GPT-5.1 for document generation...`);
     const fullInput = `${systemPrompt}\n\n${userPrompt}`;
-    const updatedContent = await callOpenAIResponses(fullInput, { reasoning: true });
+    const updatedContent = await callOpenAIResponses(
+      fullInput,
+      { reasoning: true },
+      {
+        tenantId: String(folder || config.OPENAI_DEFAULT_TENANT_ID),
+        cacheKey: openAIRequestManager.buildCacheKey(
+          'storage.applyChanges',
+          folder,
+          document,
+          recommendations.length,
+          originalContent.length
+        ),
+        requestName: 'storage.applyChanges',
+      }
+    );
     
     const processTime = Date.now() - startTime;
     console.log(`✅ Document generated in ${processTime}ms (${(processTime/1000).toFixed(1)}s)`);

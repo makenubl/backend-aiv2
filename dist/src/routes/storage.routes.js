@@ -42,25 +42,25 @@ const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const config_1 = require("../config");
 const recommendations_service_1 = require("../services/recommendations.service");
+const openai_request_manager_1 = require("../services/openai-request-manager");
 const activity_log_service_1 = require("../services/activity-log.service");
 const database_service_1 = require("../services/database.service");
 const pdf_parse_1 = __importDefault(require("pdf-parse"));
 const mammoth_1 = __importDefault(require("mammoth"));
 const gridfs = __importStar(require("../services/gridfs-storage.service"));
+const role_middleware_1 = require("../middleware/role.middleware");
 // Check if running on serverless (Vercel/Lambda - read-only filesystem)
 const isServerless = () => {
     return !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
 };
 // Helper function for new OpenAI Responses API (gpt-5.1)
-async function callOpenAIResponses(input, options) {
+async function callOpenAIResponses(input, options, metadata) {
     const url = 'https://api.openai.com/v1/responses';
-    const startTime = Date.now();
     const body = {
         model: config_1.config.OPENAI_MODEL || 'gpt-5.1',
-        input: input
+        input,
     };
     if (options?.reasoning) {
-        // Use 'low' effort for faster responses (was 'high' - took 28s, 'low' should be ~5-8s)
         body.reasoning = { effort: 'low' };
     }
     if (options?.webSearch) {
@@ -68,38 +68,46 @@ async function callOpenAIResponses(input, options) {
     }
     const inputLength = typeof input === 'string' ? input.length : JSON.stringify(input).length;
     console.log(`🤖 [OpenAI] Starting request - Model: ${body.model}, Input: ${inputLength} chars, Reasoning: ${options?.reasoning || false}`);
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config_1.config.OPENAI_API_KEY}`
-        },
-        body: JSON.stringify(body)
-    });
-    const fetchTime = Date.now() - startTime;
-    if (!response.ok) {
-        const error = await response.text();
-        console.error(`❌ [OpenAI] Error after ${fetchTime}ms:`, error);
-        throw new Error(`OpenAI API error: ${response.statusText}`);
-    }
-    const data = await response.json();
-    const totalTime = Date.now() - startTime;
-    console.log(`✅ [OpenAI] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s)`);
-    // Parse new Responses API format: { output: [{ type: "message", content: [{ type: "output_text", text: "..." }] }] }
-    if (data.output && Array.isArray(data.output)) {
-        for (const item of data.output) {
-            if (item.type === 'message' && Array.isArray(item.content)) {
-                for (const contentItem of item.content) {
-                    if (contentItem.type === 'output_text' && contentItem.text) {
-                        console.log(`📊 [OpenAI] Output: ${contentItem.text.length} chars`);
-                        return contentItem.text;
+    return openai_request_manager_1.openAIRequestManager.execute({
+        tenantId: metadata?.tenantId,
+        requestName: metadata?.requestName || 'storage.callOpenAIResponses',
+        promptSnippet: input,
+        cacheKey: metadata?.cacheKey ||
+            openai_request_manager_1.openAIRequestManager.buildCacheKey('storage.callOpenAIResponses', input.length, options?.reasoning, options?.webSearch),
+        operation: async () => {
+            const startedAt = Date.now();
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config_1.config.OPENAI_API_KEY}`
+                },
+                body: JSON.stringify(body)
+            });
+            if (!response.ok) {
+                const error = await response.text();
+                console.error(`❌ [OpenAI] Error after ${Date.now() - startedAt}ms:`, error);
+                throw new Error(`OpenAI API error: ${response.statusText}`);
+            }
+            const data = await response.json();
+            const totalTime = Date.now() - startedAt;
+            console.log(`✅ [OpenAI] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime / 1000).toFixed(1)}s)`);
+            if (data.output && Array.isArray(data.output)) {
+                for (const item of data.output) {
+                    if (item.type === 'message' && Array.isArray(item.content)) {
+                        for (const contentItem of item.content) {
+                            if (contentItem.type === 'output_text' && contentItem.text) {
+                                console.log(`📊 [OpenAI] Output: ${contentItem.text.length} chars`);
+                                return { value: contentItem.text, usage: data.usage };
+                            }
+                        }
                     }
                 }
             }
+            const fallback = data.choices?.[0]?.message?.content || '';
+            return { value: fallback, usage: data.usage };
         }
-    }
-    // Fallback for legacy format
-    return data.choices?.[0]?.message?.content || '';
+    });
 }
 const router = (0, express_1.Router)();
 // Helper function to extract text from file buffer
@@ -194,7 +202,8 @@ function resolveFolder(folderName) {
     return { base, safeName, full };
 }
 // Create a new application folder with standard structure
-router.post('/folders', async (req, res) => {
+// Requires: storage:upload permission (admin or evaluator)
+router.post('/folders', (0, role_middleware_1.requirePermission)('storage:upload'), async (req, res) => {
     const { name } = req.body || {};
     if (!name || typeof name !== 'string') {
         return res.status(400).json({ error: 'Folder name is required' });
@@ -256,7 +265,8 @@ router.post('/folders', async (req, res) => {
     }
 });
 // Delete a folder
-router.delete('/folders', async (req, res) => {
+// Requires: storage:delete permission (admin only)
+router.delete('/folders', (0, role_middleware_1.requirePermission)('storage:delete'), async (req, res) => {
     const { folder } = req.body || {};
     if (!folder || typeof folder !== 'string') {
         return res.status(400).json({ error: 'Folder name is required' });
@@ -333,7 +343,8 @@ const upload = (0, multer_1.default)({
     limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
 });
 // Upload one or multiple files to a folder
-router.post('/upload', upload.array('files', 20), async (req, res) => {
+// Requires: storage:upload permission (admin or evaluator)
+router.post('/upload', (0, role_middleware_1.requirePermission)('storage:upload'), upload.array('files', 20), async (req, res) => {
     const folderName = String(req.body.folder || req.query.folder || '');
     if (!folderName) {
         return res.status(400).json({ error: 'Target folder is required' });
@@ -493,7 +504,8 @@ router.get('/download', async (req, res) => {
     }
 });
 // Delete a file from a folder
-router.delete('/files', async (req, res) => {
+// Requires: storage:delete permission (admin only)
+router.delete('/files', (0, role_middleware_1.requirePermission)('storage:delete'), async (req, res) => {
     const { folder, fileName } = req.body || {};
     if (!folder || !fileName) {
         res.status(400).json({ error: 'folder and fileName are required' });
@@ -577,14 +589,10 @@ router.get('/recommendations', async (req, res) => {
     }
 });
 // Accept or reject recommendations by IDs on a specific version
-router.post('/recommendations/decision', async (req, res) => {
+// Requires: recommendations:modify permission (admin or evaluator)
+router.post('/recommendations/decision', (0, role_middleware_1.requirePermission)('recommendations:modify'), async (req, res) => {
     const { folder, document, version, acceptIds, rejectIds } = req.body || {};
-    const userRole = String(req.header('x-user-role') || '');
-    // Simple role enforcement: only owner/editor can modify recommendations
-    if (!userRole || !['owner', 'editor'].includes(userRole)) {
-        res.status(403).json({ error: 'Insufficient role to modify recommendations' });
-        return;
-    }
+    const userRole = (0, role_middleware_1.getUserRole)(req);
     if (!folder || !document || typeof version !== 'number') {
         res.status(400).json({ error: 'folder, document, and numeric version are required' });
         return;
@@ -676,26 +684,46 @@ router.post('/chat', async (req, res) => {
             else {
                 console.log(`ℹ️ No document specified in chat request`);
             }
-            const systemPrompt = `You are a helpful AI assistant for managing software licensing and compliance documents. 
+            const systemPrompt = `You are a senior regulatory auditor and compliance expert for the Pakistan Virtual Assets Regulatory Authority (PVARA). 
+Your role is to review submitted documents from a regulatory, legal, and policy perspective, acting as a helpful auditor and support resource for PVARA's policy and regulatory team.
+
 You have access to the following context about the current folder "${folder}":
 - Total pending recommendations: ${pendingCount}
 - Total accepted recommendations: ${acceptedCount}
 - Total rejected recommendations: ${rejectedCount}
 - Current recommendations: ${JSON.stringify(recommendationsSummary, null, 2)}
-${documentContent ? `\n\nDocument Content for "${document}":\n---\n${documentContent}\n---\n` : ''}
+${documentContent ? `\n\n📄 Document Under Review: "${document}"\n---\n${documentContent}\n---\n` : ''}
 
-Help the user understand their documents and recommendations. You can:
-- Summarize document content
-- Answer questions about specific sections
-- Explain recommendations and their importance
-- Guide them on actions they can take
+As a PVARA Regulatory Auditor, you should:
 
-Available commands they can use:
+1. **Regulatory Compliance Review**: Check if the document meets PVARA regulations, Pakistan's VASP licensing requirements, and international standards (FATF, AML/CFT guidelines).
+
+2. **Legal Perspective**: Identify any legal gaps, missing clauses, or potential legal risks. Check for proper legal disclaimers, terms of service, privacy policies, and contractual obligations.
+
+3. **Policy Assessment**: Evaluate if internal policies align with PVARA requirements including:
+   - KYC/AML procedures
+   - Customer due diligence (CDD)
+   - Transaction monitoring
+   - Suspicious activity reporting (SAR)
+   - Record keeping requirements
+   - Risk assessment frameworks
+
+4. **Gap Analysis**: Clearly identify what is MISSING from the document that should be included for regulatory approval.
+
+5. **Actionable Recommendations**: Provide specific, actionable feedback on what needs to be added, modified, or removed.
+
+When reviewing documents, structure your response as:
+- ✅ **Compliant Areas**: What's good and meets requirements
+- ⚠️ **Concerns/Gaps**: Issues that need attention
+- ❌ **Missing Requirements**: Critical items that must be added
+- 📋 **Recommendations**: Specific actions to take
+
+Available commands the user can use:
 - "Apply all" or "Accept all pending" - to accept all pending recommendations
 - "Reject all" - to reject all pending recommendations
 - Ask about specific recommendations or documents
 
-Keep responses concise and helpful. Use emojis sparingly to make responses friendly.`;
+Be thorough but concise. Act as a supportive auditor helping the applicant achieve compliance, not as an obstacle.`;
             try {
                 // Determine if this is a simple summary request or a complex analysis
                 // Simple summaries don't need reasoning (faster: ~3-5s), complex analysis uses reasoning (~8-10s)
@@ -708,7 +736,11 @@ Keep responses concise and helpful. Use emojis sparingly to make responses frien
                 console.log(`🧠 Chat mode: ${isSimpleSummary ? 'Fast Summary (no reasoning)' : 'Analysis (with reasoning)'}`);
                 // Use new Responses API - reasoning only for complex questions
                 const fullInput = `${systemPrompt}\n\nUser Question: ${message}`;
-                reply = await callOpenAIResponses(fullInput, { reasoning: useReasoning });
+                reply = await callOpenAIResponses(fullInput, { reasoning: useReasoning }, {
+                    tenantId: String(folder || config_1.config.OPENAI_DEFAULT_TENANT_ID),
+                    cacheKey: openai_request_manager_1.openAIRequestManager.buildCacheKey('storage.chat', folder, document, normalized, useReasoning),
+                    requestName: 'storage.chat',
+                });
             }
             catch (aiError) {
                 console.error('OpenAI chat error:', aiError?.message);
@@ -798,7 +830,11 @@ ${recommendationsList}
 Return the complete updated document with all recommendations applied. Start directly with the document content.`;
         console.log(`🤖 Sending to GPT-5.1 for document generation...`);
         const fullInput = `${systemPrompt}\n\n${userPrompt}`;
-        const updatedContent = await callOpenAIResponses(fullInput, { reasoning: true });
+        const updatedContent = await callOpenAIResponses(fullInput, { reasoning: true }, {
+            tenantId: String(folder || config_1.config.OPENAI_DEFAULT_TENANT_ID),
+            cacheKey: openai_request_manager_1.openAIRequestManager.buildCacheKey('storage.applyChanges', folder, document, recommendations.length, originalContent.length),
+            requestName: 'storage.applyChanges',
+        });
         const processTime = Date.now() - startTime;
         console.log(`✅ Document generated in ${processTime}ms (${(processTime / 1000).toFixed(1)}s)`);
         // Create new versioned file

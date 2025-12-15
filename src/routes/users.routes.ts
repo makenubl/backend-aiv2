@@ -103,10 +103,10 @@ router.put('/:username', requirePermission('users:manage'), async (req: Request,
     if (password) updates.password = password;
     if (name) updates.name = name;
     if (role) {
-      if (!['admin', 'evaluator', 'reviewer'].includes(role)) {
+      if (!['super-admin', 'admin', 'evaluator', 'reviewer'].includes(role)) {
         return res.status(400).json({
           success: false,
-          error: 'Role must be admin, evaluator, or reviewer'
+          error: 'Role must be super-admin, admin, evaluator, or reviewer'
         });
       }
       updates.role = role;

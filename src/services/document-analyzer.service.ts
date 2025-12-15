@@ -1,5 +1,7 @@
 import { OpenAI } from 'openai';
 import { config } from '../config';
+import { fileAwareCompletion, getOrUploadOpenAIFileId } from './openai.service';
+import { openAIRequestManager } from './openai-request-manager';
 
 export interface DocumentCategory {
   name: string;
@@ -121,69 +123,38 @@ class DocumentAnalyzerService {
       console.log(`[DocumentCache] Returning cached categorization for ${name}`);
       return documentCategorizationCache.get(cacheKey)!;
     }
-    const contentSnippet = await (async () => {
-      try {
-        const ext = filePath.toLowerCase();
-        if (ext.endsWith('.txt')) {
-          const content = require('fs').readFileSync(filePath, 'utf-8');
-          return content.length > 20000 ? content.slice(0, 20000) : content;
-        }
-        if (ext.endsWith('.pdf')) {
-          const fs = require('fs');
-          const pdfParse = require('pdf-parse');
-          const dataBuffer = fs.readFileSync(filePath);
-          const res = await pdfParse(dataBuffer);
-          const text = res.text || '';
-          return text ? (text.length > 20000 ? text.slice(0, 20000) : text) : null;
-        }
-        if (ext.endsWith('.docx')) {
-          const fs = require('fs');
-          const mammoth = require('mammoth');
-          const buffer = fs.readFileSync(filePath);
-          const res = await mammoth.extractRawText({ buffer });
-          const text = res.value || '';
-          return text ? (text.length > 20000 ? text.slice(0, 20000) : text) : null;
-        }
-        return null;
-      } catch { return null; }
-    })();
-
     if (!config.OPENAI_API_KEY) {
       // Fall back to heuristic categorization when API key missing
       return this.categorizeDocument(name);
     }
-
-    const basePrompt = `You are a Pakistan VASP NOC document classification expert.
-
-Document: ${name}
-Company: ${companyName}
-${contentSnippet ? `Content snippet (first ~20KB):\n${contentSnippet}` : 'No readable content available; infer from title and context.'}
-
-TASK 1 - Standard Classification:
-Classify into one of: corporate, compliance, financial, technical, regulatory, personnel, legal, other.
-
-TASK 2 - PVARA Document Type Classification:
-Determine if this document belongs to PVARA regulatory documents or applicant submissions:
-- "ordinance": PVARA Act 2023, AML Ordinance, regulatory ordinances (very rare in submissions)
-- "regulations": Pakistan VASP Regulations, NOC Guidelines, SBP/SECP regulations (rare in submissions)
-- "application-form": Official PVARA Forms A1, A2, A3, A4, A5, A6 (standard application forms)
-- "submitted-application": Completed/filled application forms or regulatory applications by the applicant
-- "supporting-document": Corporate docs, policies, financial statements, certificates, personnel forms
-
-IMPORTANT: Most documents from applicants will be "application-form" (if it's an official PVARA form) or "supporting-document" (if it's corporate/compliance/financial/technical documentation).
-
-TASK 3 - Subcategory:
-Provide specific subcategory (e.g., "Certificate of Incorporation", "AML Policy", "Form A3", "Board Resolution").
-
-Respond strictly as JSON with keys: {"category": string, "pvaraCategory": string, "subcategory": string, "confidence": number (0-1), "notes": string}.`;
-
     try {
-      const response = await this.openai.chat.completions.create({
-        model: config.OPENAI_MODEL,
-        messages: [{ role: 'user', content: basePrompt }],
-        max_completion_tokens: 1000,
+      const fileId = await getOrUploadOpenAIFileId(filePath);
+      const completion = await fileAwareCompletion({
+        prompt: `You are a Pakistan VASP NOC document classification expert.
+
+Full document is attached. Metadata:
+- File name: ${name}
+- Applicant: ${companyName}
+
+Perform the following tasks:
+1. Classify the document into one of: corporate, compliance, financial, technical, regulatory, personnel, legal, other.
+2. Map it to the closest PVARA pipeline bucket:
+   - "ordinance"
+   - "regulations"
+   - "application-form"
+   - "submitted-application"
+   - "supporting-document"
+3. Provide a precise subcategory label (e.g., Certificate of Incorporation, AML Policy, Form A3, Board Resolution).
+4. Provide a confidence score between 0 and 1 and add brief notes summarizing why.
+
+Return ONLY a JSON object.`,
+        instructions: 'Return strictly valid JSON with keys {"category","pvaraCategory","subcategory","confidence","notes"}. No prose.',
+        fileIds: [fileId],
+        reasoning: 'medium',
+        tenantId: _applicationId || companyName,
+        cacheKey: openAIRequestManager.buildCacheKey('document-category', filePath, companyName),
       });
-      const content = response.choices[0]?.message?.content || '{}';
+      const content = completion || '{}';
       let parsed: { category?: DocumentCategory['category']; pvaraCategory?: string; subcategory?: string; confidence?: number; notes?: string };
       try {
         parsed = JSON.parse(content);
@@ -333,13 +304,30 @@ Please provide:
 Format your response as a structured analysis.`;
 
     try {
-      const response = await this.openai.chat.completions.create({
-        model: config.OPENAI_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        max_completion_tokens: 2500
-      });
+      return await openAIRequestManager.execute<string>({
+        tenantId: applicationId,
+        requestName: 'documentAnalyzer.analyzeWithAI',
+        promptSnippet: prompt,
+        cacheKey: openAIRequestManager.buildCacheKey('document-analysis', applicationId, documents),
+        operation: async () => {
+          const response = await this.openai.chat.completions.create({
+            model: config.OPENAI_MODEL,
+            messages: [{ role: 'user', content: prompt }],
+            max_completion_tokens: 2500
+          });
 
-      return response.choices[0].message.content || 'AI analysis completed.';
+          const usage = response.usage
+            ? {
+                input_tokens: response.usage.prompt_tokens,
+                output_tokens: response.usage.completion_tokens,
+                total_tokens: response.usage.total_tokens,
+              }
+            : undefined;
+
+          const value = response.choices[0].message.content || 'AI analysis completed.';
+          return { value, usage };
+        }
+      });
     } catch (error) {
       console.error('AI analysis error:', error);
       return `AI analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}`;

@@ -9,9 +9,56 @@
  * 4. File/document analysis
  */
 
+import fs from 'fs';
+import path from 'path';
+import { OpenAI } from 'openai';
 import { config } from '../config';
+import { openAIRequestManager, TokenUsage } from './openai-request-manager';
 
 const OPENAI_API_URL = 'https://api.openai.com/v1/responses';
+const fsp = fs.promises;
+const openaiClient = new OpenAI({
+  apiKey: config.OPENAI_API_KEY,
+});
+
+interface OpenAIFileCacheRecord {
+  fileId: string;
+  size: number;
+  mtimeMs: number;
+  uploadedAt: string;
+  filename: string;
+}
+
+const OPENAI_FILE_CACHE_PATH = path.join(process.cwd(), '.cache', 'openai-files.json');
+const openaiFileCache = new Map<string, OpenAIFileCacheRecord>();
+const inflightFileUploads = new Map<string, Promise<string>>();
+
+function loadOpenAIFileCache(): void {
+  try {
+    if (fs.existsSync(OPENAI_FILE_CACHE_PATH)) {
+      const raw = fs.readFileSync(OPENAI_FILE_CACHE_PATH, 'utf-8');
+      const parsed = JSON.parse(raw) as Record<string, OpenAIFileCacheRecord>;
+      for (const [key, value] of Object.entries(parsed)) {
+        openaiFileCache.set(key, value);
+      }
+    }
+  } catch (error) {
+    console.warn('⚠️  Failed to load OpenAI file cache:', error);
+  }
+}
+
+async function persistOpenAIFileCache(): Promise<void> {
+  try {
+    const dir = path.dirname(OPENAI_FILE_CACHE_PATH);
+    await fsp.mkdir(dir, { recursive: true });
+    const contents = JSON.stringify(Object.fromEntries(openaiFileCache.entries()), null, 2);
+    await fsp.writeFile(OPENAI_FILE_CACHE_PATH, contents, 'utf-8');
+  } catch (error) {
+    console.warn('⚠️  Failed to persist OpenAI file cache:', error);
+  }
+}
+
+loadOpenAIFileCache();
 
 interface OpenAIResponseOutput {
   id: string;
@@ -40,27 +87,48 @@ interface OpenAIResponse {
   error?: any;
 }
 
+export interface OpenAIRequestOptions {
+  tenantId?: string;
+  cacheKey?: string;
+}
+
 /**
  * Extract text from OpenAI Response
  */
-function extractResponseText(response: OpenAIResponse): string {
-  if (response.error) {
+function extractResponseText(response: OpenAIResponse | any): string {
+  if (response?.error) {
     throw new Error(response.error.message || 'OpenAI API error');
   }
-  
-  const output = response.output?.[0];
-  if (!output || output.type !== 'message') {
-    return '';
+
+  const outputs: any[] = Array.isArray(response?.output) ? response.output : [];
+  for (const output of outputs) {
+    if (!output || !Array.isArray(output.content)) continue;
+    for (const contentItem of output.content) {
+      if (!contentItem) continue;
+      if (contentItem.type === 'output_text' && typeof contentItem.text === 'string') {
+        return contentItem.text;
+      }
+      if (contentItem.type === 'text') {
+        if (typeof contentItem.text === 'string') {
+          return contentItem.text;
+        }
+        if (contentItem.text && typeof contentItem.text.value === 'string') {
+          return contentItem.text.value;
+        }
+      }
+    }
   }
-  
-  const textContent = output.content?.find(c => c.type === 'output_text');
-  return textContent?.text || '';
+  return '';
 }
 
 /**
  * Basic text completion using gpt-5.1
  */
-export async function textCompletion(input: string, instructions?: string): Promise<string> {
+export async function textCompletion(
+  input: string,
+  instructions?: string,
+  requestOptions?: OpenAIRequestOptions
+): Promise<string> {
   const body: any = {
     model: config.OPENAI_MODEL || 'gpt-5.1',
     input
@@ -70,17 +138,27 @@ export async function textCompletion(input: string, instructions?: string): Prom
     body.instructions = instructions;
   }
 
-  const response = await fetch(OPENAI_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify(body)
+  return openAIRequestManager.execute<string>({
+    tenantId: requestOptions?.tenantId,
+    requestName: 'textCompletion',
+    promptSnippet: typeof input === 'string' ? input : JSON.stringify(input),
+    cacheKey:
+      requestOptions?.cacheKey ||
+      openAIRequestManager.buildCacheKey('textCompletion', instructions, input),
+    operation: async () => {
+      const response = await fetch(OPENAI_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+      });
+  
+      const data = await response.json() as OpenAIResponse;
+      return { value: extractResponseText(data), usage: data.usage };
+    }
   });
-
-  const data = await response.json() as OpenAIResponse;
-  return extractResponseText(data);
 }
 
 /**
@@ -92,7 +170,8 @@ export async function textCompletion(input: string, instructions?: string): Prom
 export async function reasoningCompletion(
   input: string, 
   effort: 'low' | 'medium' | 'high' = 'medium',
-  instructions?: string
+  instructions?: string,
+  requestOptions?: OpenAIRequestOptions
 ): Promise<string> {
   const body: any = {
     model: config.OPENAI_MODEL || 'gpt-5.1',
@@ -108,17 +187,27 @@ export async function reasoningCompletion(
 
   console.log(`🧠 Reasoning request with effort: ${effort}`);
   
-  const response = await fetch(OPENAI_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify(body)
-  });
+  return openAIRequestManager.execute<string>({
+    tenantId: requestOptions?.tenantId,
+    requestName: 'reasoningCompletion',
+    promptSnippet: input,
+    cacheKey:
+      requestOptions?.cacheKey ||
+      openAIRequestManager.buildCacheKey('reasoningCompletion', instructions, input, effort),
+    operation: async () => {
+      const response = await fetch(OPENAI_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+      });
 
-  const data = await response.json() as OpenAIResponse;
-  return extractResponseText(data);
+      const data = await response.json() as OpenAIResponse;
+      return { value: extractResponseText(data), usage: data.usage };
+    }
+  });
 }
 
 /**
@@ -126,7 +215,11 @@ export async function reasoningCompletion(
  * @param input - The search query/question
  * @param instructions - Optional system instructions
  */
-export async function webSearchCompletion(input: string, instructions?: string): Promise<string> {
+export async function webSearchCompletion(
+  input: string,
+  instructions?: string,
+  requestOptions?: OpenAIRequestOptions
+): Promise<string> {
   const body: any = {
     model: config.OPENAI_MODEL || 'gpt-5.1',
     input,
@@ -139,17 +232,27 @@ export async function webSearchCompletion(input: string, instructions?: string):
 
   console.log(`🌐 Web search request: ${input.substring(0, 50)}...`);
   
-  const response = await fetch(OPENAI_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify(body)
-  });
+  return openAIRequestManager.execute<string>({
+    tenantId: requestOptions?.tenantId,
+    requestName: 'webSearchCompletion',
+    promptSnippet: input,
+    cacheKey:
+      requestOptions?.cacheKey ||
+      openAIRequestManager.buildCacheKey('webSearchCompletion', instructions, input),
+    operation: async () => {
+      const response = await fetch(OPENAI_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+      });
 
-  const data = await response.json() as OpenAIResponse;
-  return extractResponseText(data);
+      const data = await response.json() as OpenAIResponse;
+      return { value: extractResponseText(data), usage: data.usage };
+    }
+  });
 }
 
 /**
@@ -163,7 +266,8 @@ export async function analyzeDocument(
   fileContent: string,
   fileName: string,
   prompt: string,
-  useReasoning: boolean = false
+  useReasoning: boolean = false,
+  requestOptions?: OpenAIRequestOptions
 ): Promise<string> {
   const fullInput = `Analyze this document "${fileName}":
 
@@ -184,17 +288,27 @@ ${prompt}`;
 
   console.log(`📄 Document analysis for: ${fileName} (${fileContent.length} chars)`);
   
-  const response = await fetch(OPENAI_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify(body)
-  });
+  return openAIRequestManager.execute<string>({
+    tenantId: requestOptions?.tenantId,
+    requestName: 'analyzeDocument',
+    promptSnippet: `${fileName}: ${prompt}`,
+    cacheKey:
+      requestOptions?.cacheKey ||
+      openAIRequestManager.buildCacheKey('analyzeDocument', fileName, prompt, useReasoning),
+    operation: async () => {
+      const response = await fetch(OPENAI_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify(body)
+      });
 
-  const data = await response.json() as OpenAIResponse;
-  return extractResponseText(data);
+      const data = await response.json() as OpenAIResponse;
+      return { value: extractResponseText(data), usage: data.usage };
+    }
+  });
 }
 
 /**
@@ -309,5 +423,206 @@ export default {
   analyzeDocument,
   generateDocumentRecommendations,
   applyRecommendationsToDocument,
-  chatWithDocumentContext
+  chatWithDocumentContext,
+  getOrUploadOpenAIFileId,
+  fileAwareCompletion,
+};
+
+export type OpenAIFilePurpose = 'assistants' | 'batch' | 'fine-tune';
+
+export interface FileAwareCompletionOptions {
+  prompt: string;
+  fileIds: string[];
+  instructions?: string;
+  reasoning?: 'low' | 'medium' | 'high';
+  preferAssistant?: boolean;
+  assistantId?: string;
+  model?: string;
+  tenantId?: string;
+  cacheKey?: string;
+}
+
+export async function getOrUploadOpenAIFileId(
+  filePath: string,
+  purpose: OpenAIFilePurpose = 'assistants'
+): Promise<string> {
+  if (!config.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY not configured; cannot upload files.');
+  }
+
+  const absolutePath = path.resolve(filePath);
+  const stats = await fsp.stat(absolutePath);
+  const cacheKey = absolutePath;
+  const cached = openaiFileCache.get(cacheKey);
+  if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+    return cached.fileId;
+  }
+
+  if (inflightFileUploads.has(cacheKey)) {
+    return inflightFileUploads.get(cacheKey)!;
+  }
+
+  const uploadPromise = (async () => {
+    if (!fs.existsSync(absolutePath)) {
+      throw new Error(`Cannot upload missing file: ${absolutePath}`);
+    }
+    const fileStream = fs.createReadStream(absolutePath);
+    const uploaded = await openaiClient.files.create({
+      file: fileStream,
+      purpose,
+    });
+    const record: OpenAIFileCacheRecord = {
+      fileId: uploaded.id,
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+      uploadedAt: new Date().toISOString(),
+      filename: path.basename(absolutePath),
+    };
+    openaiFileCache.set(cacheKey, record);
+    await persistOpenAIFileCache();
+    return uploaded.id;
+  })();
+
+  inflightFileUploads.set(cacheKey, uploadPromise);
+  try {
+    return await uploadPromise;
+  } finally {
+    inflightFileUploads.delete(cacheKey);
+  }
+}
+
+async function createResponseWithFilesInternal(
+  options: FileAwareCompletionOptions
+): Promise<{ value: string; usage?: TokenUsage }> {
+  const userContent: any[] = [
+    {
+      type: 'input_text',
+      text: options.prompt,
+    }
+  ];
+  for (const fileId of options.fileIds) {
+    userContent.push({ type: 'input_file', file_id: fileId });
+  }
+
+  const response = await openaiClient.responses.create({
+    model: options.model || config.OPENAI_MODEL || 'gpt-5.1',
+    input: [
+      {
+        role: 'user',
+        content: userContent,
+      }
+    ],
+    reasoning: options.reasoning ? { effort: options.reasoning } : undefined,
+    instructions: options.instructions,
+  });
+
+  const usage = (response as any).usage as TokenUsage | undefined;
+  return { value: extractResponseText(response), usage };
+}
+
+async function runAssistantWithFiles(
+  options: FileAwareCompletionOptions & { assistantId: string }
+): Promise<{ value: string; usage?: TokenUsage }> {
+  const thread = await openaiClient.beta.threads.create();
+
+  const attachments = options.fileIds.map(fileId => ({
+    file_id: fileId,
+    tools: [{ type: 'file_search' as const }],
+  }));
+
+  const prompt = options.instructions
+    ? `${options.instructions}\n\nUser Request:\n${options.prompt}`
+    : options.prompt;
+
+  await openaiClient.beta.threads.messages.create(thread.id, {
+    role: 'user',
+    content: [{ type: 'text', text: prompt }],
+    attachments: attachments.length ? attachments : undefined,
+  });
+
+  const run = await openaiClient.beta.threads.runs.createAndPoll(thread.id, {
+    assistant_id: options.assistantId,
+  });
+
+  if (run.status !== 'completed') {
+    throw new Error(`Assistant run ended with status ${run.status}`);
+  }
+
+  const usage: TokenUsage | undefined = run.usage
+    ? {
+        input_tokens:
+          (run.usage as any).prompt_tokens ?? (run.usage as any).input_tokens ?? undefined,
+        output_tokens:
+          (run.usage as any).completion_tokens ?? (run.usage as any).output_tokens ?? undefined,
+        total_tokens: (run.usage as any).total_tokens,
+      }
+    : undefined;
+
+  const messages = await openaiClient.beta.threads.messages.list(thread.id, {
+    order: 'desc',
+    limit: 10,
+  });
+
+  for (const message of messages.data) {
+    if (message.role !== 'assistant') continue;
+    const parts: string[] = [];
+    for (const part of message.content) {
+      if ('text' in part && part.text?.value) {
+        parts.push(part.text.value);
+      } else if (part.type === 'text' && typeof (part as any).text === 'string') {
+        parts.push((part as any).text);
+      }
+    }
+    if (parts.length) {
+      return { value: parts.join('\n'), usage };
+    }
+  }
+
+  return { value: '', usage };
+}
+
+export async function fileAwareCompletion(options: FileAwareCompletionOptions): Promise<string> {
+  if (!config.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY not configured.');
+  }
+  if (!options.fileIds || options.fileIds.length === 0) {
+    return textCompletion(options.prompt, options.instructions, {
+      tenantId: options.tenantId,
+      cacheKey: options.cacheKey,
+    });
+  }
+
+  const cacheKey =
+    options.cacheKey ||
+    openAIRequestManager.buildCacheKey(
+      'fileAwareCompletion',
+      options.prompt,
+      options.instructions,
+      options.fileIds,
+      options.reasoning,
+      options.preferAssistant,
+    );
+
+  return openAIRequestManager.execute<string>({
+    tenantId: options.tenantId,
+    requestName: 'fileAwareCompletion',
+    promptSnippet: options.prompt,
+    cacheKey,
+    operation: async () => {
+      const assistantId = options.assistantId || config.OPENAI_ASSISTANT_ID;
+      if (assistantId && options.preferAssistant !== false) {
+        try {
+          return await runAssistantWithFiles({ ...options, assistantId });
+        } catch (error) {
+          console.warn('⚠️  Assistant run failed, falling back to Responses API:', error);
+        }
+      }
+      return createResponseWithFilesInternal(options);
+    }
+  });
+}
+
+export const openAIFileTools = {
+  getOrUploadOpenAIFileId,
+  fileAwareCompletion,
 };
