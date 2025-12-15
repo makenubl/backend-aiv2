@@ -2,6 +2,76 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { documentAnalyzerService, DocumentAnalysis, DocumentCategory } from './document-analyzer.service';
 import { saveEvaluation, getEvaluation } from './database.service';
+import { config } from '../config';
+
+// Response type for OpenAI Responses API
+interface OpenAIResponsesData {
+  status?: string;
+  output?: Array<{
+    type: string;
+    content?: Array<{
+      type: string;
+      text?: string;
+    }>;
+  }>;
+  error?: { message: string };
+}
+
+// Helper function for OpenAI Responses API (gpt-5.1)
+async function callOpenAIResponsesAPI(input: string, options?: { reasoning?: boolean }): Promise<string> {
+  const url = 'https://api.openai.com/v1/responses';
+  const startTime = Date.now();
+  
+  const body: any = {
+    model: config.OPENAI_MODEL || 'gpt-5.1',
+    input: input
+  };
+
+  if (options?.reasoning) {
+    body.reasoning = { effort: 'medium' };
+  }
+
+  console.log(`🤖 [OpenAI Responses API] Generating AI Insights - Model: ${body.model}`);
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error(`❌ [OpenAI] Error:`, error);
+      throw new Error(`OpenAI API error: ${response.statusText}`);
+    }
+
+    const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
+    const totalTime = Date.now() - startTime;
+    console.log(`✅ [OpenAI] AI Insights generated - Time: ${totalTime}ms`);
+    
+    // Parse Responses API format
+    if (data.output && Array.isArray(data.output)) {
+      for (const item of data.output) {
+        if (item.type === 'message' && Array.isArray(item.content)) {
+          for (const contentItem of item.content) {
+            if (contentItem.type === 'output_text' && contentItem.text) {
+              return contentItem.text;
+            }
+          }
+        }
+      }
+    }
+    
+    return '';
+  } catch (error) {
+    console.error(`❌ [OpenAI] Failed to generate insights:`, error);
+    return '';
+  }
+}
 
 export interface ApplicationFolder {
   id: string;
@@ -256,8 +326,8 @@ class ApplicationFolderService {
     // Determine recommendation
     const recommendation = this.determineRecommendation(scores, comments);
 
-    // Generate AI insights
-    const aiInsights = this.generateAIInsights(data, scores, comments, docAnalysis);
+    // Generate AI insights using GPT-5.1
+    const aiInsights = await this.generateAIInsights(data, scores, comments, docAnalysis);
 
     // Optional: AI per-document categorization to enrich evaluation
     let aiDocCategories: DocumentCategory[] | undefined;
@@ -335,7 +405,7 @@ class ApplicationFolderService {
       },
       aiInsights,
       aiDocumentCategories: aiDocCategories,
-      modelUsed: 'o1',
+      modelUsed: config.OPENAI_MODEL || 'gpt-5.1',
       nextSteps,
       conditions,
       evaluatedAt: new Date()
@@ -730,55 +800,149 @@ class ApplicationFolderService {
     }
   }
 
-  private generateAIInsights(data: any, scores: any, comments: EvaluationComment[], docAnalysis?: DocumentAnalysis): string {
+  private async generateAIInsights(data: any, scores: any, comments: EvaluationComment[], docAnalysis?: DocumentAnalysis): Promise<string> {
     const criticalCount = comments.filter(c => c.severity === 'critical').length;
     const highCount = comments.filter(c => c.severity === 'high').length;
+    const mediumCount = comments.filter(c => c.severity === 'medium').length;
+    const lowCount = comments.filter(c => c.severity === 'low').length;
 
-    let insights = `AI-Powered Evaluation Summary for ${data.companyName}:\n\n`;
-    insights += `Overall Assessment Score: ${scores.overall}/100 (Risk Level: ${scores.riskLevel.toUpperCase()})\n\n`;
+    // Prepare comprehensive context for GPT-5.1
+    const prompt = `You are a senior regulatory evaluator for the Pakistan Virtual Assets Regulatory Authority (PVARA).
+Generate a COMPREHENSIVE and DETAILED regulatory assessment for this VASP license application.
+
+🏢 **APPLICANT INFORMATION:**
+- Company Name: ${data.companyName || 'Unknown'}
+- Application Name: ${data.appName || 'N/A'}
+- Country: ${data.country || 'Unknown'}
+- Founded: ${data.founded || 'Unknown'}
+- Team Size: ${data.teamSize || 'Unknown'}
+- Description: ${data.description || 'No description provided'}
+
+📊 **EVALUATION SCORES:**
+- Overall Score: ${scores.overall}/100
+- Risk Level: ${scores.riskLevel?.toUpperCase()}
+- Compliance Score: ${scores.compliance}/100
+- Technical Score: ${scores.technical}/100
+- Business Score: ${scores.business}/100
+- Regulatory Score: ${scores.regulatory}/100
+
+⚠️ **ISSUES IDENTIFIED:**
+- Critical Issues: ${criticalCount}
+- High Priority Issues: ${highCount}
+- Medium Priority Issues: ${mediumCount}
+- Low Priority Issues: ${lowCount}
+
+📋 **TOP CONCERNS:**
+${comments.slice(0, 5).map(c => `• [${c.severity.toUpperCase()}] ${c.title}: ${c.description}`).join('\n')}
+
+📄 **DOCUMENT ANALYSIS:**
+${docAnalysis ? `
+- Total Documents: ${docAnalysis.totalDocuments || 0}
+- Missing Categories: ${docAnalysis.missingCategories?.join(', ') || 'None identified'}
+- Category Breakdown: ${JSON.stringify(docAnalysis.categoryBreakdown || {})}
+` : 'No document analysis available'}
+
+🌍 **REGULATORY CONTEXT:**
+- Regulatory History: ${data.regulatoryHistory || 'Not provided'}
+- Existing Licenses: ${data.existingLicenses || 'Not specified'}
+- Pakistan Operations Plan: ${data.pakistanTeamPlan ? 'Provided' : 'NOT PROVIDED (CRITICAL GAP)'}
+- AML/CFT Framework: ${data.amlCftFramework || 'Not detailed'}
+
+📝 **GENERATE A DETAILED ASSESSMENT COVERING:**
+
+1. **Executive Summary** (3-4 sentences on overall assessment, key strengths, and main concerns)
+
+2. **Regulatory Compliance Analysis**
+   - PVARA regulations compliance status
+   - FATF Recommendations alignment (especially Rec. 15)
+   - AML/CFT Act 2010 (Pakistan) adherence
+   - KYC/CDD requirements assessment
+   - Travel Rule readiness
+
+3. **Risk Assessment**
+   - Money laundering risk level
+   - Terrorist financing risk indicators
+   - Operational risk factors
+   - Technology/cybersecurity risks
+   - Reputational risk considerations
+
+4. **Documentation Gaps**
+   - Missing critical documents
+   - Documents requiring updates
+   - Additional submissions needed
+
+5. **Key Strengths** (what the applicant does well)
+
+6. **Key Weaknesses** (areas requiring improvement)
+
+7. **Conditions for Approval** (if applicable)
+   - Mandatory conditions
+   - Recommended enhancements
+
+8. **Final Recommendation**
+   - Clear APPROVE / CONDITIONAL APPROVAL / REJECT recommendation
+   - Confidence level (HIGH/MEDIUM/LOW)
+   - Next steps for the applicant
+
+Format the response with clear sections using headers and bullet points. Be specific and actionable in your recommendations.`;
+
+    try {
+      // Call GPT-5.1 with reasoning for thorough analysis
+      const aiResponse = await callOpenAIResponsesAPI(prompt, { reasoning: true });
+      
+      if (aiResponse && aiResponse.length > 100) {
+        return aiResponse;
+      }
+    } catch (error) {
+      console.error('Failed to generate AI insights with GPT-5.1:', error);
+    }
+
+    // Fallback to template-based insights if API fails
+    let insights = `📊 AI-Powered Evaluation Summary for ${data.companyName}:\n\n`;
+    insights += `Overall Assessment Score: ${scores.overall}/100 (Risk Level: ${scores.riskLevel?.toUpperCase()})\n\n`;
     insights += `The application has been analyzed across 8 due diligence dimensions. `;
     
     if (criticalCount > 0) {
-      insights += `CRITICAL ISSUES IDENTIFIED (${criticalCount}): These must be resolved before approval. `;
+      insights += `⛔ CRITICAL ISSUES IDENTIFIED (${criticalCount}): These must be resolved before approval. `;
     }
     
     if (highCount > 0) {
-      insights += `High-priority concerns (${highCount}) require attention. `;
+      insights += `⚠️ High-priority concerns (${highCount}) require attention. `;
     }
 
-    insights += `\n\nKey Strengths:\n`;
+    insights += `\n\n✅ Key Strengths:\n`;
     if (data.regulatoryHistory && data.regulatoryHistory.includes('Licensed')) {
       insights += `• Established regulatory track record with international licenses\n`;
     }
     
-    // Evidence from submitted documents
-    const hasPersonnel = docAnalysis && docAnalysis.categoryBreakdown['personnel'] >= 3;
-    const hasCompliance = docAnalysis && docAnalysis.categoryBreakdown['compliance'] >= 2;
-    const hasCorporate = docAnalysis && docAnalysis.categoryBreakdown['corporate'] >= 4;
+    const hasPersonnel = docAnalysis && docAnalysis.categoryBreakdown && docAnalysis.categoryBreakdown['personnel'] >= 3;
+    const hasCompliance = docAnalysis && docAnalysis.categoryBreakdown && docAnalysis.categoryBreakdown['compliance'] >= 2;
+    const hasCorporate = docAnalysis && docAnalysis.categoryBreakdown && docAnalysis.categoryBreakdown['corporate'] >= 4;
     
     if (hasPersonnel) {
-      insights += `• Strong governance: ${docAnalysis.categoryBreakdown['personnel']} key personnel documents submitted\n`;
+      insights += `• Strong governance: ${docAnalysis!.categoryBreakdown['personnel']} key personnel documents submitted\n`;
     }
     if (hasCorporate) {
-      insights += `• Robust corporate structure: ${docAnalysis.categoryBreakdown['corporate']} corporate documents verified\n`;
+      insights += `• Robust corporate structure: ${docAnalysis!.categoryBreakdown['corporate']} corporate documents verified\n`;
     }
     if (hasCompliance) {
-      insights += `• Comprehensive compliance framework: ${docAnalysis.categoryBreakdown['compliance']} policies documented\n`;
+      insights += `• Comprehensive compliance framework: ${docAnalysis!.categoryBreakdown['compliance']} policies documented\n`;
     }
 
-    insights += `\nKey Concerns:\n`;
-    comments.slice(0, 3).forEach(c => {
-      insights += `• ${c.title}: ${c.description}\n`;
+    insights += `\n❌ Key Concerns:\n`;
+    comments.slice(0, 5).forEach(c => {
+      insights += `• [${c.severity.toUpperCase()}] ${c.title}: ${c.description}\n`;
     });
 
-    insights += `\nPakistan Market Fit: `;
+    insights += `\n🇵🇰 Pakistan Market Fit: `;
     if (data.pakistanTeamPlan) {
       insights += `Applicant has provided Pakistan operations plan. `;
     } else {
-      insights += `CRITICAL GAP: No Pakistan-specific operations plan. `;
+      insights += `CRITICAL GAP: No Pakistan-specific operations plan provided. `;
     }
 
-    insights += `\n\nRecommendation Confidence: ${scores.overall >= 70 ? 'HIGH' : scores.overall >= 50 ? 'MEDIUM' : 'LOW'}`;
+    insights += `\n\n📈 Recommendation Confidence: ${scores.overall >= 70 ? 'HIGH' : scores.overall >= 50 ? 'MEDIUM' : 'LOW'}`;
+    insights += `\n\n📌 Model Used: ${config.OPENAI_MODEL || 'gpt-5.1'} (Fallback mode - API response was insufficient)`;
 
     return insights;
   }
@@ -811,6 +975,20 @@ class ApplicationFolderService {
       });
 
     return { nextSteps, conditions };
+  }
+
+  /**
+   * Clear evaluation cache for a specific application or all applications
+   * This forces re-evaluation with GPT-5.1 on next request
+   */
+  public clearEvaluationCache(applicationId?: string): void {
+    if (applicationId) {
+      evaluationCache.delete(applicationId);
+      console.log(`[EvaluationCache] Cleared cache for ${applicationId}`);
+    } else {
+      evaluationCache.clear();
+      console.log(`[EvaluationCache] Cleared all cached evaluations`);
+    }
   }
 }
 

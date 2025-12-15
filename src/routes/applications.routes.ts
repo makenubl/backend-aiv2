@@ -85,10 +85,20 @@ router.get('/documents/library', async (_req: Request, res: Response) => {
 /**
  * GET /api/applications/:id/evaluate
  * Perform comprehensive evaluation of application
+ * Query params:
+ *   - refresh=true: Force re-evaluation with GPT-5.1 (clears cache)
  */
 router.get('/:id/evaluate', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const refresh = req.query.refresh === 'true';
+    
+    // If refresh requested, clear the cache first
+    if (refresh) {
+      console.log(`🔄 Refresh requested for ${id} - clearing cache for GPT-5.1 re-evaluation`);
+      applicationFolderService.clearEvaluationCache(id);
+    }
+    
     const evaluation = await applicationFolderService.evaluateApplication(id);
     
     res.json({
@@ -100,6 +110,26 @@ router.get('/:id/evaluate', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'Evaluation failed'
+    });
+  }
+});
+
+/**
+ * POST /api/applications/refresh-all
+ * Clear all evaluation caches to force GPT-5.1 re-evaluation
+ */
+router.post('/refresh-all', async (req: Request, res: Response) => {
+  try {
+    applicationFolderService.clearEvaluationCache();
+    res.json({
+      success: true,
+      message: 'All evaluation caches cleared. Next evaluations will use GPT-5.1.'
+    });
+  } catch (error) {
+    console.error('Error clearing caches:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to clear caches'
     });
   }
 });
