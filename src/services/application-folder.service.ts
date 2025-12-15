@@ -516,8 +516,7 @@ Be thorough, specific, and cite the relevant regulatory sections where applicabl
     console.log('🤖 Calling GPT-5.1 for configured evaluation...');
     
     try {
-      // Call GPT-5.1 for evaluation
-      const { callOpenAIResponsesAPI } = await import('./openai.service');
+      // Call GPT-5.1 for evaluation (using local function defined at top of file)
       const aiResponse = await callOpenAIResponsesAPI(evaluationPrompt, { reasoning: true });
 
       // Parse the AI response to extract scores and recommendations
@@ -571,14 +570,14 @@ Be thorough, specific, and cite the relevant regulatory sections where applicabl
         aiInsights: aiResponse,
         aiDocumentCategories: documents.map(d => ({
           name: d.name,
-          category: d.tag,
+          category: 'other' as const,
           subcategory: d.tag,
-          pvaraCategory: d.tag,
-          applicant: companyName,
+          pvaraCategory: d.tag as 'ordinance' | 'regulations' | 'application-form' | 'submitted-application' | 'supporting-document',
+          applicantName: companyName,
           relevanceScore: 0.9,
           notes: 'User-tagged document'
         })),
-        modelUsed: config.OPENAI_MODEL || 'gpt-5.1',
+        modelUsed: (await import('../config')).config.OPENAI_MODEL || 'gpt-5.1',
         nextSteps: recommendation.nextSteps || [],
         conditions: recommendation.conditions || [],
         evaluatedAt: new Date()
@@ -647,19 +646,19 @@ Be thorough, specific, and cite the relevant regulatory sections where applicabl
    * Parse AI response to extract recommendation
    */
   private parseAIRecommendation(aiResponse: string): {
-    decision: 'approve' | 'conditional' | 'reject' | 'review';
+    decision: 'approve' | 'conditional-approval' | 'reject' | 'needs-review';
     nextSteps: string[];
     conditions: string[];
   } {
     const response = aiResponse.toLowerCase();
-    let decision: 'approve' | 'conditional' | 'reject' | 'review' = 'review';
+    let decision: 'approve' | 'conditional-approval' | 'reject' | 'needs-review' = 'needs-review';
     const nextSteps: string[] = [];
     const conditions: string[] = [];
 
     if (response.includes('reject') || response.includes('not approved') || response.includes('denial')) {
       decision = 'reject';
     } else if (response.includes('conditional approval') || response.includes('approve with conditions')) {
-      decision = 'conditional';
+      decision = 'conditional-approval';
     } else if (response.includes('approve') && !response.includes('not approve')) {
       decision = 'approve';
     }
@@ -675,7 +674,7 @@ Be thorough, specific, and cite the relevant regulatory sections where applicabl
     }
 
     // Default next steps based on decision
-    if (decision === 'conditional') {
+    if (decision === 'conditional-approval') {
       nextSteps.push('Submit missing documentation within 30 days');
       nextSteps.push('Address identified compliance gaps');
       nextSteps.push('Schedule follow-up review meeting');

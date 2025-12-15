@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { applicationFolderService } from '../services/application-folder.service';
 import { documentAnalyzerService } from '../services/document-analyzer.service';
-import { requirePermission, requireEvaluator, getPermissionsHandler } from '../middleware/role.middleware';
+import { requirePermission, getPermissionsHandler } from '../middleware/role.middleware';
 
 const router = Router();
 
@@ -127,7 +127,7 @@ router.get('/:id/evaluate', requirePermission('evaluation:trigger'), async (req:
  * Clear all evaluation caches to force GPT-5.1 re-evaluation
  * Requires: evaluator or admin role
  */
-router.post('/refresh-all', requirePermission('evaluation:refresh'), async (req: Request, res: Response) => {
+router.post('/refresh-all', requirePermission('evaluation:refresh'), async (_req: Request, res: Response) => {
   try {
     await applicationFolderService.clearEvaluationCache();
     res.json({
