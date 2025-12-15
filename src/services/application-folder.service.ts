@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import pdfParse from 'pdf-parse';
+import mammoth from 'mammoth';
 import { documentAnalyzerService, DocumentAnalysis, DocumentCategory } from './document-analyzer.service';
 import { saveEvaluation, getEvaluation, deleteEvaluation } from './database.service';
 import { config } from '../config';
@@ -445,26 +447,104 @@ class ApplicationFolderService {
     console.log(`📄 Selected ${documents.length} documents`);
     console.log(`✅ Using ${checklists.length} regulatory checklists`);
 
-    // Build document context for AI
-    const applicationFormDocs = documentsByTag['application-form'] || [];
-    const regulationDocs = documentsByTag['regulation'] || [];
-    const supportingDocs = documentsByTag['supporting'] || [];
-    const ordinanceDocs = documentsByTag['ordinance'] || [];
+    // Helper function to read file content
+    const readDocumentContent = async (fileName: string): Promise<string> => {
+      try {
+        // Determine the document path
+        const workspaceRoot = path.join(process.cwd(), '..');
+        let basePath = path.join(workspaceRoot, 'applications');
+        if (!fs.existsSync(basePath)) {
+          basePath = path.join(process.cwd(), 'applications');
+        }
+        const filePath = path.join(basePath, folder, 'documents', fileName);
+        
+        if (!fs.existsSync(filePath)) {
+          console.warn(`⚠️ File not found: ${filePath}`);
+          return `[File not found: ${fileName}]`;
+        }
+
+        const stats = fs.statSync(filePath);
+        if (stats.size === 0) {
+          return `[File is empty: ${fileName}]`;
+        }
+
+        const lower = fileName.toLowerCase();
+        
+        // Parse PDF files
+        if (lower.endsWith('.pdf')) {
+          console.log(`📄 Parsing PDF: ${fileName}`);
+          const buffer = fs.readFileSync(filePath);
+          try {
+            const data = await pdfParse(buffer);
+            const text = data.text || '';
+            // Limit text to prevent token overflow (max ~10k chars per doc)
+            return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+          } catch (pdfErr) {
+            console.error(`Error parsing PDF ${fileName}:`, pdfErr);
+            return `[Error parsing PDF: ${fileName}]`;
+          }
+        }
+        
+        // Parse DOCX files
+        if (lower.endsWith('.docx')) {
+          console.log(`📄 Parsing DOCX: ${fileName}`);
+          try {
+            const result = await mammoth.extractRawText({ path: filePath });
+            const text = result.value || '';
+            return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+          } catch (docxErr) {
+            console.error(`Error parsing DOCX ${fileName}:`, docxErr);
+            return `[Error parsing DOCX: ${fileName}]`;
+          }
+        }
+        
+        // Plain text files
+        if (lower.endsWith('.txt') || lower.endsWith('.json') || lower.endsWith('.md')) {
+          const text = fs.readFileSync(filePath, 'utf-8');
+          return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+        }
+        
+        return `[Unsupported file format: ${fileName}]`;
+      } catch (err) {
+        console.error(`Error reading ${fileName}:`, err);
+        return `[Error reading file: ${fileName}]`;
+      }
+    };
+
+    // Read all document contents
+    console.log('📚 Reading document contents...');
+    const documentContents: Array<{ name: string; tag: string; content: string }> = [];
+    
+    for (const doc of documents) {
+      const content = await readDocumentContent(doc.name);
+      documentContents.push({ name: doc.name, tag: doc.tag, content });
+      console.log(`  ✅ ${doc.name} (${doc.tag}): ${content.length} chars`);
+    }
 
     // Build comprehensive prompt with selected documents and checklists
     const checklistText = checklists.map(cl => 
       `### ${cl.name}\n${cl.items.map((item, i) => `${i + 1}. ${item}`).join('\n')}`
     ).join('\n\n');
 
+    // Build document content sections by tag
+    const buildDocSection = (tag: string, title: string): string => {
+      const docs = documentContents.filter(d => d.tag === tag);
+      if (docs.length === 0) return `${title}:\nNone selected\n`;
+      return `${title}:\n${docs.map(d => `\n--- ${d.name} ---\n${d.content}`).join('\n')}`;
+    };
+
     const documentsText = `
 📋 APPLICATION FORMS:
-${applicationFormDocs.length > 0 ? applicationFormDocs.map(d => `- ${d}`).join('\n') : 'None selected'}
+${buildDocSection('application-form', 'Application Forms')}
 
-📜 REGULATIONS & ORDINANCES:
-${[...regulationDocs, ...ordinanceDocs].map(d => `- ${d}`).join('\n') || 'None selected'}
+📜 REGULATIONS:
+${buildDocSection('regulation', 'Regulatory Documents')}
+
+📁 ORDINANCES:
+${buildDocSection('ordinance', 'Ordinance Documents')}
 
 📎 SUPPORTING DOCUMENTS:
-${supportingDocs.length > 0 ? supportingDocs.map(d => `- ${d}`).join('\n') : 'None selected'}
+${buildDocSection('supporting', 'Supporting Documents')}
 `;
 
     const evaluationPrompt = `${aiContext}
@@ -513,6 +593,9 @@ Based on the documents listed above and the regulatory checklists provided, perf
 
 Be thorough, specific, and cite the relevant regulatory sections where applicable.`;
 
+    const totalDocChars = documentContents.reduce((sum, d) => sum + d.content.length, 0);
+    console.log(`📊 Total document content: ${totalDocChars} characters`);
+    console.log(`📝 Total prompt size: ${evaluationPrompt.length} characters`);
     console.log('🤖 Calling GPT-5.1 for configured evaluation...');
     
     try {
@@ -525,8 +608,11 @@ Be thorough, specific, and cite the relevant regulatory sections where applicabl
       
       const comments: EvaluationComment[] = [];
       
-      // Add document gap comments
-      if (applicationFormDocs.length === 0) {
+      // Add document gap comments based on what was selected
+      const hasApplicationForms = documentContents.some(d => d.tag === 'application-form');
+      const hasRegulations = documentContents.some(d => d.tag === 'regulation' || d.tag === 'ordinance');
+      
+      if (!hasApplicationForms) {
         comments.push({
           category: 'compliance',
           severity: 'critical',
@@ -536,7 +622,7 @@ Be thorough, specific, and cite the relevant regulatory sections where applicabl
         });
       }
 
-      if (regulationDocs.length === 0 && ordinanceDocs.length === 0) {
+      if (!hasRegulations) {
         comments.push({
           category: 'regulatory',
           severity: 'high',
