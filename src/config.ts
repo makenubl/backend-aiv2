@@ -1,8 +1,19 @@
 import dotenv from 'dotenv';
 import path from 'path';
 
-// When running from dist/src/, we need to go up two levels to find .env
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// Try loading .env from both source and dist locations
+const envPath = path.resolve(__dirname, '../.env');
+const envPath2 = path.resolve(__dirname, '../../.env');
+const envPath3 = path.resolve(process.cwd(), '.env');
+
+// Try multiple paths
+dotenv.config({ path: envPath });
+if (!process.env.OPENAI_API_KEY) {
+  dotenv.config({ path: envPath2 });
+}
+if (!process.env.OPENAI_API_KEY) {
+  dotenv.config({ path: envPath3 });
+}
 
 export const config = {
   PORT: process.env.PORT || 3001,
