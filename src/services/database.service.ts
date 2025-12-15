@@ -111,6 +111,31 @@ export const createUser = async (user: Omit<User, '_id'>): Promise<User> => {
   };
 };
 
+export const getAllUsers = async (): Promise<User[]> => {
+  const collection = getUsersCollection();
+  return await collection.find({}).toArray();
+};
+
+export const updateUser = async (username: string, updates: Partial<Omit<User, '_id' | 'createdAt'>>): Promise<User | null> => {
+  const collection = getUsersCollection();
+  const result = await collection.findOneAndUpdate(
+    { username },
+    { $set: { ...updates, updatedAt: new Date() } },
+    { returnDocument: 'after' }
+  );
+  return result;
+};
+
+export const deleteUser = async (username: string): Promise<boolean> => {
+  const collection = getUsersCollection();
+  // Prevent deleting the main admin
+  if (username === 'admin@pvara.gov.pk') {
+    throw new Error('Cannot delete the primary admin account');
+  }
+  const result = await collection.deleteOne({ username });
+  return result.deletedCount > 0;
+};
+
 export const seedDefaultUsers = async (): Promise<void> => {
   const collection = getUsersCollection();
   const count = await collection.countDocuments();

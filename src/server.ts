@@ -8,6 +8,7 @@ import evaluationRoutes from './routes/evaluation.routes';
 import applicationsRoutes from './routes/applications.routes';
 import authRoutes from './routes/auth.routes';
 import storageRoutes from './routes/storage.routes';
+import usersRoutes from './routes/users.routes';
 
 const app = express();
 
@@ -48,6 +49,7 @@ app.use(apiKeyMiddleware);
 app.use('/api/evaluation', evaluationRoutes);
 app.use('/api/applications', applicationsRoutes);
 app.use('/api/storage', storageRoutes);
+app.use('/api/users', usersRoutes);
 
 // Health check
 app.get('/health', (_req, res) => {
