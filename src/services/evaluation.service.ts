@@ -43,8 +43,72 @@ function determineRiskLevel(riskScore: number): 'critical' | 'high' | 'medium' |
   return 'low';
 }
 
+// Response type for OpenAI Responses API
+interface OpenAIResponsesData {
+  status?: string;
+  output?: Array<{
+    type: string;
+    content?: Array<{
+      type: string;
+      text?: string;
+    }>;
+  }>;
+  error?: { message: string };
+}
+
+// Helper function for new OpenAI Responses API (gpt-5.1)
+async function callOpenAIResponsesAPI(input: string, options?: { reasoning?: boolean }): Promise<string> {
+  const url = 'https://api.openai.com/v1/responses';
+  const startTime = Date.now();
+  
+  const body: any = {
+    model: config.OPENAI_MODEL || 'gpt-5.1',
+    input: input
+  };
+
+  if (options?.reasoning) {
+    body.reasoning = { effort: 'medium' }; // Use medium effort for balanced speed/quality
+  }
+
+  console.log(`🤖 [OpenAI Responses API] Starting request - Model: ${body.model}, Reasoning: ${options?.reasoning || false}`);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.OPENAI_API_KEY}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    console.error(`❌ [OpenAI] Error:`, error);
+    throw new Error(`OpenAI API error: ${response.statusText}`);
+  }
+
+  const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
+  const totalTime = Date.now() - startTime;
+  console.log(`✅ [OpenAI] Response received - Time: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
+  
+  // Parse Responses API format
+  if (data.output && Array.isArray(data.output)) {
+    for (const item of data.output) {
+      if (item.type === 'message' && Array.isArray(item.content)) {
+        for (const contentItem of item.content) {
+          if (contentItem.type === 'output_text' && contentItem.text) {
+            return contentItem.text;
+          }
+        }
+      }
+    }
+  }
+  
+  return '';
+}
+
 export class EvaluationService {
-  // Single-call evaluation to reduce OpenAI usage
+  // Single-call evaluation to reduce OpenAI usage - Uses GPT-5.1 Responses API
   async evaluateApplicationSingleCall(
     application: NOCApplication,
     contextFiles?: string[]
@@ -53,51 +117,120 @@ export class EvaluationService {
     const context = contextFiles?.join('\n---\n') || 'No additional context provided.';
 
     console.log(`\n📊 [EVALUATION START] Application: ${application.name} v${application.version}`);
-    console.log(`🔧 Using LLM Model: ${config.OPENAI_MODEL}`);
+    console.log(`🔧 Using LLM Model: ${config.OPENAI_MODEL} (Responses API)`);
     console.log(`📋 Max Tokens: ${config.OPENAI_MAX_TOKENS}`);
     console.log(`⚖️  Evaluation Weights: Compliance=${config.EVALUATION_WEIGHTS.COMPLIANCE * 100}%, Security=${config.EVALUATION_WEIGHTS.SECURITY * 100}%, Docs=${config.EVALUATION_WEIGHTS.DOCUMENTATION * 100}%, Technical=${config.EVALUATION_WEIGHTS.TECHNICAL * 100}%`);
 
-    const prompt = `You are a Pakistan VASP NOC evaluator. Analyze the application and return ONE JSON block containing compliance, risk, and an executive summary.
+    const prompt = `You are a senior regulatory evaluator for the Pakistan Virtual Assets Regulatory Authority (PVARA). 
+You are conducting a comprehensive NOC (No Objection Certificate) evaluation for a Virtual Asset Service Provider (VASP) license application.
 
-Application Details:
-Name: ${application.name}
-Vendor: ${application.vendor}
-Version: ${application.version}
-Description: ${application.description}
+🏢 **APPLICATION DETAILS:**
+- Name: ${application.name}
+- Vendor/Applicant: ${application.vendor}
+- Version: ${application.version}
+- Description: ${application.description}
 
-Additional Context (filenames or snippets):
+📄 **SUBMITTED DOCUMENTS/CONTEXT:**
 ${context}
 
-Respond strictly as JSON with the schema:
+🔍 **EVALUATION REQUIREMENTS:**
+Conduct a DETAILED assessment covering:
+
+1. **REGULATORY COMPLIANCE** (Weight: 40%)
+   - PVARA Regulations compliance
+   - FATF Recommendations alignment (especially Rec. 15 for VASPs)
+   - AML/CFT Act 2010 (Pakistan) requirements
+   - SBP regulations for digital payments
+   - KYC/CDD requirements under AMLA
+   - Travel Rule compliance readiness
+   - Licensing prerequisites checklist
+
+2. **SECURITY & RISK ASSESSMENT** (Weight: 30%)
+   - Cybersecurity framework adequacy
+   - Cold/hot wallet security measures
+   - Multi-signature requirements
+   - Incident response procedures
+   - Business continuity planning
+   - Insurance/reserve requirements
+   - Third-party security audits
+
+3. **DOCUMENTATION REVIEW** (Weight: 15%)
+   - Business plan completeness
+   - Organizational structure clarity
+   - Beneficial ownership disclosure
+   - Source of funds documentation
+   - Policies and procedures manuals
+   - Board/management qualifications
+
+4. **TECHNICAL INFRASTRUCTURE** (Weight: 15%)
+   - Transaction monitoring systems
+   - Blockchain analytics integration
+   - Sanctions screening capability
+   - Record-keeping systems (5-year retention)
+   - Reporting mechanisms (STR/CTR)
+   - System audit trails
+
+📋 **RESPONSE FORMAT:**
+Provide a comprehensive JSON response with detailed findings:
+
 {
   "compliance": {
     "compliant": boolean,
-    "score": number,
-    "issues": [{"severity": "critical|high|medium|low", "category": string, "description": string, "recommendation": string}],
-    "recommendations": [string]
+    "score": number (0-100),
+    "overallAssessment": "string - 2-3 sentence summary of compliance status",
+    "issues": [
+      {
+        "severity": "critical|high|medium|low",
+        "category": "string (e.g., KYC/AML, Licensing, FATF, Cybersecurity)",
+        "description": "Detailed description of the issue",
+        "regulatoryReference": "Specific regulation/guideline being violated",
+        "recommendation": "Specific remediation steps required",
+        "deadline": "Suggested timeline for remediation"
+      }
+    ],
+    "recommendations": ["Array of general improvement recommendations"],
+    "requiredDocuments": ["List of any missing required documents"],
+    "conditionalApproval": boolean,
+    "conditionsForApproval": ["If conditional, list specific conditions"]
   },
   "risk": {
     "riskLevel": "critical|high|medium|low",
-    "riskScore": number,
-    "threats": [{"type": string, "likelihood": "high|medium|low", "impact": "high|medium|low", "description": string}],
-    "mitigations": [string]
+    "riskScore": number (0-100, higher = more risky),
+    "riskSummary": "2-3 sentence risk assessment summary",
+    "threats": [
+      {
+        "type": "string (e.g., Money Laundering, Terrorist Financing, Fraud, Cyber Attack)",
+        "likelihood": "high|medium|low",
+        "impact": "high|medium|low",
+        "description": "Detailed threat description",
+        "existingControls": "What controls exist (if any)",
+        "controlGaps": "What's missing",
+        "recommendedMitigation": "Specific mitigation measures"
+      }
+    ],
+    "mitigations": ["General risk mitigation recommendations"],
+    "monitoringRequirements": ["Ongoing monitoring requirements if approved"]
   },
-  "summary": string
-}`;
+  "summary": "Comprehensive executive summary (4-6 sentences) covering overall assessment, key concerns, recommendation (approve/reject/conditional), and next steps"
+}
 
-    const message = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      max_completion_tokens: config.OPENAI_MAX_TOKENS,
-    });
-
-    const duration = Date.now() - startTime;
-    const tokensUsed = message.usage?.total_tokens || 0;
-    logLLMCall('evaluateApplicationSingleCall', config.OPENAI_MODEL, tokensUsed, duration);
+Be thorough, specific, and cite relevant Pakistani regulations where applicable. Identify ALL gaps and provide actionable recommendations.`;
 
     try {
-      const content = message.choices[0]?.message?.content || '{}';
-      const parsed = JSON.parse(content);
+      // Use OpenAI Responses API with reasoning for thorough analysis
+      const responseText = await callOpenAIResponsesAPI(prompt, { reasoning: true });
+      
+      const duration = Date.now() - startTime;
+      logLLMCall('evaluateApplicationSingleCall', config.OPENAI_MODEL, undefined, duration);
+
+      // Extract JSON from response (handle markdown code blocks)
+      let jsonContent = responseText;
+      const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (jsonMatch) {
+        jsonContent = jsonMatch[1].trim();
+      }
+      
+      const parsed = JSON.parse(jsonContent);
       
       const compliance = parsed.compliance || { compliant: true, score: 75, issues: [], recommendations: ['Manual review recommended'] };
       const risk = parsed.risk || { riskLevel: 'medium', riskScore: 50, threats: [], mitigations: ['Manual review recommended'] };
@@ -105,7 +238,7 @@ Respond strictly as JSON with the schema:
       
       console.log(`✅ [EVALUATION COMPLETE] Overall Score: ${overallScore}/100`);
       console.log(`   Compliance: ${compliance.score}/100 | Risk: ${risk.riskLevel} (${risk.riskScore}/100)`);
-      console.log(`   Issues: ${compliance.issues.length} | Threats: ${risk.threats.length}`);
+      console.log(`   Issues: ${compliance.issues?.length || 0} | Threats: ${risk.threats?.length || 0}`);
       
       return {
         applicationId: application.id,
