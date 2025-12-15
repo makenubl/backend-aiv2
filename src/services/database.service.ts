@@ -205,6 +205,16 @@ export const getEvaluation = async (applicationId: string): Promise<any | null> 
   return doc?.evaluation || null;
 };
 
+export const deleteEvaluation = async (applicationId: string): Promise<boolean> => {
+  const collection = getEvaluationsCollection();
+  const result = await collection.deleteOne({ applicationId });
+  if (result.deletedCount > 0) {
+    console.log(`🗑️ Deleted evaluation from MongoDB for ${applicationId}`);
+    return true;
+  }
+  return false;
+};
+
 export const getAllEvaluations = async (): Promise<StoredEvaluation[]> => {
   const collection = getEvaluationsCollection();
   return await collection.find({}).toArray();
@@ -290,6 +300,7 @@ export default {
   getEvaluationsCollection,
   saveEvaluation,
   getEvaluation,
+  deleteEvaluation,
   getAllEvaluations
   ,getRecommendationsCollection
   ,saveRecommendationsVersion

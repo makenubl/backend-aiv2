@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { documentAnalyzerService, DocumentAnalysis, DocumentCategory } from './document-analyzer.service';
-import { saveEvaluation, getEvaluation } from './database.service';
+import { saveEvaluation, getEvaluation, deleteEvaluation } from './database.service';
 import { config } from '../config';
 
 // Response type for OpenAI Responses API
@@ -980,14 +980,27 @@ Format the response with clear sections using headers and bullet points. Be spec
   /**
    * Clear evaluation cache for a specific application or all applications
    * This forces re-evaluation with GPT-5.1 on next request
+   * Clears both memory cache AND MongoDB stored evaluation
    */
-  public clearEvaluationCache(applicationId?: string): void {
+  public async clearEvaluationCache(applicationId?: string): Promise<void> {
     if (applicationId) {
+      // Clear memory cache
       evaluationCache.delete(applicationId);
-      console.log(`[EvaluationCache] Cleared cache for ${applicationId}`);
+      console.log(`[EvaluationCache] Cleared memory cache for ${applicationId}`);
+      
+      // Clear MongoDB cache
+      try {
+        await deleteEvaluation(applicationId);
+        console.log(`[MongoDB] Deleted stored evaluation for ${applicationId}`);
+      } catch (error) {
+        console.warn(`[MongoDB] Could not delete evaluation for ${applicationId}:`, error);
+      }
     } else {
+      // Clear all memory cache
       evaluationCache.clear();
       console.log(`[EvaluationCache] Cleared all cached evaluations`);
+      // Note: For "clear all", we don't delete from MongoDB to preserve history
+      // Users should use specific applicationId to force refresh
     }
   }
 }

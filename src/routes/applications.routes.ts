@@ -93,10 +93,10 @@ router.get('/:id/evaluate', async (req: Request, res: Response) => {
     const { id } = req.params;
     const refresh = req.query.refresh === 'true';
     
-    // If refresh requested, clear the cache first
+    // If refresh requested, clear both memory and MongoDB cache first
     if (refresh) {
-      console.log(`🔄 Refresh requested for ${id} - clearing cache for GPT-5.1 re-evaluation`);
-      applicationFolderService.clearEvaluationCache(id);
+      console.log(`🔄 Refresh requested for ${id} - clearing all caches for GPT-5.1 re-evaluation`);
+      await applicationFolderService.clearEvaluationCache(id);
     }
     
     const evaluation = await applicationFolderService.evaluateApplication(id);
@@ -120,7 +120,7 @@ router.get('/:id/evaluate', async (req: Request, res: Response) => {
  */
 router.post('/refresh-all', async (req: Request, res: Response) => {
   try {
-    applicationFolderService.clearEvaluationCache();
+    await applicationFolderService.clearEvaluationCache();
     res.json({
       success: true,
       message: 'All evaluation caches cleared. Next evaluations will use GPT-5.1.'
