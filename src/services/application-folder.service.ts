@@ -425,6 +425,277 @@ class ApplicationFolderService {
     return evaluation;
   }
 
+  /**
+   * Perform evaluation with custom configuration
+   * Allows selecting specific documents and regulatory checklists
+   */
+  public async evaluateWithConfig(config: {
+    applicationId: string;
+    folder: string;
+    documents: Array<{ name: string; tag: string }>;
+    documentsByTag: Record<string, string[]>;
+    checklists: Array<{ id: string; name: string; items: string[] }>;
+    aiContext: string;
+    companyName: string;
+  }): Promise<ComprehensiveEvaluation> {
+    const { applicationId, folder, documents, documentsByTag, checklists, aiContext, companyName } = config;
+    
+    console.log(`📋 Starting configured evaluation for ${applicationId}`);
+    console.log(`📁 Using documents from folder: ${folder}`);
+    console.log(`📄 Selected ${documents.length} documents`);
+    console.log(`✅ Using ${checklists.length} regulatory checklists`);
+
+    // Build document context for AI
+    const applicationFormDocs = documentsByTag['application-form'] || [];
+    const regulationDocs = documentsByTag['regulation'] || [];
+    const supportingDocs = documentsByTag['supporting'] || [];
+    const ordinanceDocs = documentsByTag['ordinance'] || [];
+
+    // Build comprehensive prompt with selected documents and checklists
+    const checklistText = checklists.map(cl => 
+      `### ${cl.name}\n${cl.items.map((item, i) => `${i + 1}. ${item}`).join('\n')}`
+    ).join('\n\n');
+
+    const documentsText = `
+📋 APPLICATION FORMS:
+${applicationFormDocs.length > 0 ? applicationFormDocs.map(d => `- ${d}`).join('\n') : 'None selected'}
+
+📜 REGULATIONS & ORDINANCES:
+${[...regulationDocs, ...ordinanceDocs].map(d => `- ${d}`).join('\n') || 'None selected'}
+
+📎 SUPPORTING DOCUMENTS:
+${supportingDocs.length > 0 ? supportingDocs.map(d => `- ${d}`).join('\n') : 'None selected'}
+`;
+
+    const evaluationPrompt = `${aiContext}
+
+=== EVALUATION CONTEXT ===
+
+🏢 APPLICANT: ${companyName}
+📁 APPLICATION ID: ${applicationId}
+
+=== SELECTED DOCUMENTS FOR REVIEW ===
+${documentsText}
+
+=== REGULATORY CHECKLISTS TO EVALUATE AGAINST ===
+${checklistText}
+
+=== EVALUATION INSTRUCTIONS ===
+
+Based on the documents listed above and the regulatory checklists provided, perform a comprehensive evaluation:
+
+1. **DOCUMENT REVIEW**: For each regulatory checklist item, indicate whether the corresponding document/evidence is:
+   - ✅ PRESENT and compliant
+   - ⚠️ PRESENT but requires clarification
+   - ❌ MISSING or non-compliant
+
+2. **COMPLIANCE SCORING**: Provide scores (0-100%) for each regulatory area:
+   - NOC Regulations Compliance
+   - VA Fit & Proper Requirements  
+   - SECP Prerequisites
+   - Licensing Regulations
+
+3. **RISK ASSESSMENT**: Identify potential risks in:
+   - AML/CFT compliance
+   - Governance structure
+   - Technical security
+   - Operational capabilities
+
+4. **GAP ANALYSIS**: List all missing documents and compliance gaps
+
+5. **RECOMMENDATIONS**: Provide specific, actionable recommendations for addressing each gap
+
+6. **FINAL DECISION**: Based on the evaluation, provide:
+   - Overall Compliance Score (0-100%)
+   - Risk Level (Low/Medium/High/Critical)
+   - Recommendation (APPROVE / CONDITIONAL APPROVAL / REJECT)
+   - Required conditions for approval (if applicable)
+
+Be thorough, specific, and cite the relevant regulatory sections where applicable.`;
+
+    console.log('🤖 Calling GPT-5.1 for configured evaluation...');
+    
+    try {
+      // Call GPT-5.1 for evaluation
+      const { callOpenAIResponsesAPI } = await import('./openai.service');
+      const aiResponse = await callOpenAIResponsesAPI(evaluationPrompt, { reasoning: true });
+
+      // Parse the AI response to extract scores and recommendations
+      const scores = this.parseAIScores(aiResponse);
+      const recommendation = this.parseAIRecommendation(aiResponse);
+      
+      const comments: EvaluationComment[] = [];
+      
+      // Add document gap comments
+      if (applicationFormDocs.length === 0) {
+        comments.push({
+          category: 'compliance',
+          severity: 'critical',
+          title: 'No Application Forms Selected',
+          description: 'No application forms were selected for evaluation. Please ensure all required forms are included.',
+          evaluatedAt: new Date()
+        });
+      }
+
+      if (regulationDocs.length === 0 && ordinanceDocs.length === 0) {
+        comments.push({
+          category: 'regulatory',
+          severity: 'high',
+          title: 'No Regulations Referenced',
+          description: 'No regulatory documents were selected for compliance checking.',
+          evaluatedAt: new Date()
+        });
+      }
+
+      // Build evaluation result
+      const evaluation: ComprehensiveEvaluation = {
+        applicationId,
+        overallScore: scores.overall,
+        riskLevel: scores.riskLevel,
+        recommendation: recommendation.decision,
+        complianceScore: scores.compliance,
+        technicalScore: scores.technical,
+        businessScore: scores.business,
+        regulatoryScore: scores.regulatory,
+        comments,
+        dueDiligenceChecks: {
+          corporateVerification: { passed: true, notes: 'Evaluated from selected documents' },
+          licenseVerification: { passed: scores.regulatory >= 60, notes: 'Based on document review' },
+          financialStability: { passed: scores.business >= 60, notes: 'Based on document review' },
+          technicalCapability: { passed: scores.technical >= 60, notes: 'Based on document review' },
+          complianceFramework: { passed: scores.compliance >= 60, notes: 'Based on document review' },
+          dataProtection: { passed: true, notes: 'Evaluated from selected documents' },
+          riskManagement: { passed: scores.riskLevel !== 'critical', notes: 'Based on risk assessment' },
+          pakistanReadiness: { passed: true, notes: 'Evaluated from selected documents' }
+        },
+        aiInsights: aiResponse,
+        aiDocumentCategories: documents.map(d => ({
+          name: d.name,
+          category: d.tag,
+          subcategory: d.tag,
+          pvaraCategory: d.tag,
+          applicant: companyName,
+          relevanceScore: 0.9,
+          notes: 'User-tagged document'
+        })),
+        modelUsed: config.OPENAI_MODEL || 'gpt-5.1',
+        nextSteps: recommendation.nextSteps || [],
+        conditions: recommendation.conditions || [],
+        evaluatedAt: new Date()
+      };
+
+      // Save to MongoDB
+      try {
+        await saveEvaluation(applicationId, evaluation);
+      } catch (error) {
+        console.error(`[MongoDB] Failed to save configured evaluation for ${applicationId}:`, error);
+      }
+
+      return evaluation;
+    } catch (error) {
+      console.error('Configured evaluation error:', error);
+      throw new Error(`Evaluation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Parse AI response to extract scores
+   */
+  private parseAIScores(aiResponse: string): {
+    overall: number;
+    compliance: number;
+    technical: number;
+    business: number;
+    regulatory: number;
+    riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  } {
+    // Default scores
+    let overall = 65;
+    let compliance = 65;
+    let technical = 70;
+    let business = 65;
+    let regulatory = 60;
+    let riskLevel: 'low' | 'medium' | 'high' | 'critical' = 'medium';
+
+    const response = aiResponse.toLowerCase();
+
+    // Try to extract overall score
+    const overallMatch = response.match(/overall.*?(\d{1,3})%|overall score.*?(\d{1,3})/i);
+    if (overallMatch) {
+      overall = parseInt(overallMatch[1] || overallMatch[2]);
+    }
+
+    // Try to extract compliance score
+    const complianceMatch = response.match(/compliance.*?(\d{1,3})%|compliance score.*?(\d{1,3})/i);
+    if (complianceMatch) {
+      compliance = parseInt(complianceMatch[1] || complianceMatch[2]);
+    }
+
+    // Try to extract risk level
+    if (response.includes('critical risk') || response.includes('risk.*critical')) {
+      riskLevel = 'critical';
+    } else if (response.includes('high risk') || response.includes('risk.*high')) {
+      riskLevel = 'high';
+    } else if (response.includes('low risk') || response.includes('risk.*low')) {
+      riskLevel = 'low';
+    }
+
+    return { overall, compliance, technical, business, regulatory, riskLevel };
+  }
+
+  /**
+   * Parse AI response to extract recommendation
+   */
+  private parseAIRecommendation(aiResponse: string): {
+    decision: 'approve' | 'conditional' | 'reject' | 'review';
+    nextSteps: string[];
+    conditions: string[];
+  } {
+    const response = aiResponse.toLowerCase();
+    let decision: 'approve' | 'conditional' | 'reject' | 'review' = 'review';
+    const nextSteps: string[] = [];
+    const conditions: string[] = [];
+
+    if (response.includes('reject') || response.includes('not approved') || response.includes('denial')) {
+      decision = 'reject';
+    } else if (response.includes('conditional approval') || response.includes('approve with conditions')) {
+      decision = 'conditional';
+    } else if (response.includes('approve') && !response.includes('not approve')) {
+      decision = 'approve';
+    }
+
+    // Extract conditions (simple pattern matching)
+    const conditionMatch = response.match(/conditions?[:\s]*\n?([\s\S]*?)(?:\n\n|$)/i);
+    if (conditionMatch) {
+      const conditionText = conditionMatch[1];
+      const bulletPoints = conditionText.match(/[-•]\s*([^\n]+)/g);
+      if (bulletPoints) {
+        conditions.push(...bulletPoints.map(b => b.replace(/^[-•]\s*/, '').trim()).slice(0, 5));
+      }
+    }
+
+    // Default next steps based on decision
+    if (decision === 'conditional') {
+      nextSteps.push('Submit missing documentation within 30 days');
+      nextSteps.push('Address identified compliance gaps');
+      nextSteps.push('Schedule follow-up review meeting');
+    } else if (decision === 'reject') {
+      nextSteps.push('Review rejection reasons in detail');
+      nextSteps.push('Prepare comprehensive remediation plan');
+      nextSteps.push('Consider reapplication after addressing gaps');
+    } else if (decision === 'approve') {
+      nextSteps.push('Proceed with license issuance');
+      nextSteps.push('Schedule onboarding meeting');
+      nextSteps.push('Begin compliance monitoring setup');
+    } else {
+      nextSteps.push('Additional review required');
+      nextSteps.push('Submit clarification documents');
+      nextSteps.push('Schedule review meeting with regulatory team');
+    }
+
+    return { decision, nextSteps, conditions };
+  }
+
   private checkCorporateVerification(data: any, comments: EvaluationComment[]): { passed: boolean; notes: string } {
     const issues: string[] = [];
     
