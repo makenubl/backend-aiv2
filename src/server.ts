@@ -4,6 +4,7 @@ import cors from 'cors';
 import { config } from './config';
 import { apiKeyMiddleware, errorHandler } from './middleware/auth.middleware';
 import { connectDatabase, seedDefaultUsers } from './services/database.service';
+import * as s3Storage from './services/s3-storage.service';
 import evaluationRoutes from './routes/evaluation.routes';
 import applicationsRoutes from './routes/applications.routes';
 import authRoutes from './routes/auth.routes';
@@ -52,8 +53,25 @@ app.use('/api/storage', storageRoutes);
 app.use('/api/users', usersRoutes);
 
 // Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date() });
+app.get('/health', async (_req, res) => {
+  const storageMode = process.env.STORAGE_MODE || 'local';
+  let s3Status = 'not configured';
+  
+  if (storageMode === 's3' && s3Storage.isS3Configured()) {
+    try {
+      const connected = await s3Storage.checkS3Connection();
+      s3Status = connected ? 'connected' : 'disconnected';
+    } catch (e) {
+      s3Status = 'error';
+    }
+  }
+  
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date(),
+    storageMode,
+    s3Status
+  });
 });
 
 // Error handling
@@ -67,6 +85,20 @@ const PORT = config.PORT;
   try {
     await connectDatabase();
     await seedDefaultUsers();
+    
+    // Initialize S3 storage if configured
+    const storageMode = process.env.STORAGE_MODE || 'local';
+    if (storageMode === 's3' && s3Storage.isS3Configured()) {
+      try {
+        await s3Storage.initS3Storage();
+        console.log('✅ S3 Storage initialized');
+      } catch (e) {
+        console.warn('⚠️ S3 Storage initialization failed:', e);
+        console.warn('   Falling back to local/GridFS storage');
+      }
+    } else {
+      console.log(`📦 Storage mode: ${storageMode}`);
+    }
     
     app.listen(PORT, () => {
       console.log(`✅ NOC Evaluator Backend running on port ${PORT}`);

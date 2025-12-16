@@ -10,11 +10,20 @@ import { deleteRecommendationsForDocument } from '../services/database.service';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
 import * as gridfs from '../services/gridfs-storage.service';
+import * as s3Storage from '../services/s3-storage.service';
 import { requirePermission, getUserRole } from '../middleware/role.middleware';
+
+// Storage mode: 's3' | 'gridfs' | 'local'
+const STORAGE_MODE = process.env.STORAGE_MODE || 'local';
 
 // Check if running on serverless (Vercel/Lambda - read-only filesystem)
 const isServerless = (): boolean => {
   return !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+};
+
+// Check if using S3 storage
+const useS3Storage = (): boolean => {
+  return STORAGE_MODE === 's3' && s3Storage.isS3Configured();
 };
 
 // Response type for OpenAI Responses API
@@ -169,9 +178,16 @@ async function readFileText(filePath: string): Promise<string> {
   }
 }
 
-// Helper to get file content as text (works for both filesystem and GridFS)
+// Helper to get file content as text (works for S3, GridFS, and filesystem)
 async function getFileText(folderName: string, fileName: string): Promise<string> {
-  if (isServerless()) {
+  if (useS3Storage()) {
+    // Use S3
+    const buffer = await s3Storage.getFileBuffer(folderName, fileName);
+    if (!buffer) {
+      return '[File not found]';
+    }
+    return extractTextFromBuffer(buffer, fileName);
+  } else if (isServerless()) {
     // Use GridFS
     const buffer = await gridfs.getFileBuffer(folderName, fileName);
     if (!buffer) {
@@ -221,7 +237,18 @@ router.post('/folders', requirePermission('storage:upload'), async (req, res) =>
     const userEmail = String(req.header('x-user-email') || '');
     const userRole = String(req.header('x-user-role') || '');
     
-    if (isServerless()) {
+    if (useS3Storage()) {
+      // Use S3 storage with MongoDB metadata
+      await s3Storage.createFolder(name, userEmail);
+      await s3Storage.appendActivityLog({
+        id: `create-${safeName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'create-folder',
+        folder: safeName,
+        timestamp: new Date().toISOString(),
+      });
+    } else if (isServerless()) {
       // Use GridFS on serverless
       await gridfs.createFolder(name, userEmail);
       await gridfs.appendActivityLog({
@@ -289,7 +316,21 @@ router.delete('/folders', requirePermission('storage:delete'), async (req, res) 
     const userEmail = String(req.header('x-user-email') || '');
     const userRole = String(req.header('x-user-role') || '');
     
-    if (isServerless()) {
+    if (useS3Storage()) {
+      // Use S3 storage
+      const deleted = await s3Storage.deleteFolder(safeName);
+      if (!deleted) {
+        return res.status(404).json({ error: 'Folder not found' });
+      }
+      await s3Storage.appendActivityLog({
+        id: `delete-${safeName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'delete-folder',
+        folder: safeName,
+        timestamp: new Date().toISOString(),
+      });
+    } else if (isServerless()) {
       // Use GridFS on serverless
       const deleted = await gridfs.deleteFolder(safeName);
       if (!deleted) {
@@ -333,7 +374,7 @@ router.delete('/folders', requirePermission('storage:delete'), async (req, res) 
 });
 
 // Multer storage configured to place files under the specified folder's documents directory
-// Use memory storage for serverless (GridFS), disk storage for local
+// Use memory storage for S3/serverless (GridFS), disk storage for local
 const diskStorage = multer.diskStorage({
   destination: (req, _file, cb) => {
     const folderName = String(req.body.folder || req.query.folder || '');
@@ -352,9 +393,9 @@ const diskStorage = multer.diskStorage({
 
 const memoryStorage = multer.memoryStorage();
 
-// Choose storage based on environment
+// Choose storage based on environment - use memory storage for S3 or serverless
 const upload = multer({ 
-  storage: isServerless() ? memoryStorage : diskStorage,
+  storage: (useS3Storage() || isServerless()) ? memoryStorage : diskStorage,
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
 });
 
@@ -373,10 +414,33 @@ router.post('/upload', requirePermission('storage:upload'), upload.array('files'
 
   const userEmail = String(req.header('x-user-email') || '');
   const userRole = String(req.header('x-user-role') || '');
-  const uploadedFiles: { name: string; size: number }[] = [];
+  const uploadedFiles: { name: string; size: number; s3Key?: string }[] = [];
 
   try {
-    if (isServerless()) {
+    if (useS3Storage()) {
+      // Use S3 storage - files are in memory (buffer)
+      for (const file of files) {
+        const safeFileName = file.originalname.replace(/[^a-zA-Z0-9-_.]/g, '_');
+        const metadata = await s3Storage.uploadFile(
+          folderName,
+          safeFileName,
+          file.buffer,
+          file.mimetype,
+          userEmail
+        );
+        uploadedFiles.push({ name: safeFileName, size: file.size, s3Key: metadata.s3Key });
+      }
+      
+      await s3Storage.appendActivityLog({
+        id: `upload-${folderName}-${Date.now()}`,
+        userEmail,
+        userRole,
+        action: 'upload-files',
+        folder: folderName,
+        meta: { files: uploadedFiles.map(f => f.name), storage: 's3' },
+        timestamp: new Date().toISOString(),
+      });
+    } else if (isServerless()) {
       // Use GridFS on serverless - files are in memory (buffer)
       for (const file of files) {
         const safeFileName = file.originalname.replace(/[^a-zA-Z0-9-_.]/g, '_');
@@ -430,12 +494,14 @@ router.post('/upload', requirePermission('storage:upload'), upload.array('files'
       });
     }
     
-    console.log(`📤 Upload complete - Files: ${uploadedFiles.map(f => f.name).join(', ')} (No AI processing at upload time)`);
+    const storageMode = useS3Storage() ? 'S3' : (isServerless() ? 'GridFS' : 'filesystem');
+    console.log(`📤 Upload complete [${storageMode}] - Files: ${uploadedFiles.map(f => f.name).join(', ')}`);
     
     return res.status(200).json({
       message: 'Files uploaded',
       folder: folderName,
       files: uploadedFiles,
+      storage: storageMode,
       recommendationsGenerated: [] // Recommendations generated on-demand via chat
     });
   } catch (error: any) {
@@ -447,16 +513,20 @@ router.post('/upload', requirePermission('storage:upload'), upload.array('files'
 // List folders
 router.get('/folders', async (_req, res) => {
   try {
-    if (isServerless()) {
+    if (useS3Storage()) {
+      // Use S3 storage with MongoDB metadata
+      const folders = await s3Storage.listFolders();
+      res.json({ folders: folders.map(f => f.safeName), storage: 's3' });
+    } else if (isServerless()) {
       // Use GridFS on serverless
       const folders = await gridfs.listFolders();
-      res.json({ folders: folders.map(f => f.safeName) });
+      res.json({ folders: folders.map(f => f.safeName), storage: 'gridfs' });
     } else {
       // Use filesystem locally
       const base = getApplicationsBasePath();
       const entries = fs.readdirSync(base, { withFileTypes: true });
       const folders = entries.filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => e.name);
-      res.json({ folders });
+      res.json({ folders, storage: 'local' });
     }
   } catch (error: any) {
     console.error('Error listing folders:', error);
@@ -473,20 +543,34 @@ router.get('/files', async (req, res) => {
   }
   
   try {
-    if (isServerless()) {
+    if (useS3Storage()) {
+      // Use S3 storage with MongoDB metadata
+      const files = await s3Storage.listFiles(folderName);
+      res.json({ 
+        files: files.map(f => f.fileName),
+        filesWithMetadata: files.map(f => ({
+          name: f.fileName,
+          size: f.size,
+          mimeType: f.mimeType,
+          s3Key: f.s3Key,
+          uploadedAt: f.createdAt
+        })),
+        storage: 's3'
+      });
+    } else if (isServerless()) {
       // Use GridFS on serverless
       const files = await gridfs.listFiles(folderName);
-      res.json({ files: files.map(f => f.fileName) });
+      res.json({ files: files.map(f => f.fileName), storage: 'gridfs' });
     } else {
       // Use filesystem locally
       const { full } = resolveFolder(folderName);
       const docsDir = path.join(full, 'documents');
       if (!fs.existsSync(docsDir)) {
-        res.json({ files: [] });
+        res.json({ files: [], storage: 'local' });
         return;
       }
       const files = fs.readdirSync(docsDir).filter(n => !n.startsWith('.'));
-      res.json({ files });
+      res.json({ files, storage: 'local' });
     }
   } catch (error: any) {
     console.error('Error listing files:', error);
@@ -505,7 +589,17 @@ router.get('/download', async (req, res) => {
   }
   
   try {
-    if (isServerless()) {
+    if (useS3Storage()) {
+      // Use S3 storage
+      const fileData = await s3Storage.getFile(folderName, fileName);
+      if (!fileData) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+      }
+      res.setHeader('Content-Type', fileData.metadata.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      res.send(fileData.buffer);
+    } else if (isServerless()) {
       // Use GridFS on serverless
       const fileData = await gridfs.getFile(folderName, fileName);
       if (!fileData) {
@@ -543,7 +637,14 @@ router.delete('/files', requirePermission('storage:delete'), async (req, res) =>
   }
   
   try {
-    if (isServerless()) {
+    if (useS3Storage()) {
+      // Use S3 storage
+      const deleted = await s3Storage.deleteFile(String(folder), String(fileName));
+      if (!deleted) {
+        res.status(404).json({ error: 'File not found' });
+        return;
+      }
+    } else if (isServerless()) {
       // Use GridFS on serverless
       const deleted = await gridfs.deleteFile(String(folder), String(fileName));
       if (!deleted) {
