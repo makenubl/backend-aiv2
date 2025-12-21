@@ -10,6 +10,11 @@ import applicationsRoutes from './routes/applications.routes';
 import authRoutes from './routes/auth.routes';
 import storageRoutes from './routes/storage.routes';
 import usersRoutes from './routes/users.routes';
+// Project Tracker Module - routes
+import projectsRoutes from './routes/projects.routes';
+import vendorPortalRoutes from './routes/vendor-portal.routes';
+import projectTrackerRoutes from './routes/project-tracker.routes';
+import { initializeProjectTrackerDb } from './services/project-tracker-db.service';
 
 const app = express();
 
@@ -43,6 +48,10 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 // Auth routes (no API key required)
 app.use('/api/auth', authRoutes);
 
+// Vendor Portal routes (separate authentication, no API key)
+// This allows vendors/external users to access without main system credentials
+app.use('/api/portal', vendorPortalRoutes);
+
 // Ring-fenced: API key validation for other routes
 app.use(apiKeyMiddleware);
 
@@ -51,6 +60,10 @@ app.use('/api/evaluation', evaluationRoutes);
 app.use('/api/applications', applicationsRoutes);
 app.use('/api/storage', storageRoutes);
 app.use('/api/users', usersRoutes);
+// Project Tracker routes (requires API key authentication)
+app.use('/api/projects', projectsRoutes);
+// Project Tracker wizard routes (file upload, AI analysis, task management)
+app.use('/api/project-tracker', projectTrackerRoutes);
 
 // Health check
 app.get('/health', async (_req, res) => {
@@ -83,8 +96,11 @@ const PORT = config.PORT;
 // Initialize database and start server
 (async () => {
   try {
-    await connectDatabase();
+    const db = await connectDatabase();
     await seedDefaultUsers();
+    
+    // Initialize Project Tracker collections and indexes
+    await initializeProjectTrackerDb(db);
     
     // Initialize S3 storage if configured
     const storageMode = process.env.STORAGE_MODE || 'local';

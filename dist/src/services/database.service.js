@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteRecommendationsForDocument = exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.deleteEvaluation = exports.getEvaluation = exports.saveEvaluation = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.deleteUser = exports.updateUser = exports.getAllUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.connectDatabase = void 0;
+exports.deleteRecommendationsForDocument = exports.updateRecommendationStatus = exports.getRecommendationsTrail = exports.saveRecommendationsVersion = exports.getAllEvaluations = exports.deleteEvaluation = exports.getEvaluation = exports.saveEvaluation = exports.getRecommendationsCollection = exports.getEvaluationsCollection = exports.seedDefaultUsers = exports.deleteUser = exports.updateUser = exports.getAllUsers = exports.createUser = exports.findUserByEmail = exports.findUserByUsername = exports.getUsersCollection = exports.disconnectDatabase = exports.getDatabase = exports.connectDatabase = void 0;
 const mongodb_1 = require("mongodb");
 let mongoClient;
 let database;
@@ -26,6 +26,7 @@ const connectDatabase = async () => {
         const recommendationsCollection = database.collection(RECOMMENDATIONS_COLLECTION);
         await recommendationsCollection.createIndex({ applicationId: 1, documentName: 1, version: 1 }, { unique: true });
         await recommendationsCollection.createIndex({ applicationId: 1 });
+        return database;
     }
     catch (error) {
         console.error('❌ Failed to connect to MongoDB:', error);
@@ -33,6 +34,13 @@ const connectDatabase = async () => {
     }
 };
 exports.connectDatabase = connectDatabase;
+const getDatabase = () => {
+    if (!database) {
+        throw new Error('Database not connected');
+    }
+    return database;
+};
+exports.getDatabase = getDatabase;
 const disconnectDatabase = async () => {
     if (mongoClient) {
         await mongoClient.close();

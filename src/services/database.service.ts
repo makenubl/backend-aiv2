@@ -47,7 +47,7 @@ const USERS_COLLECTION = 'users';
 const EVALUATIONS_COLLECTION = 'evaluations';
 const RECOMMENDATIONS_COLLECTION = 'recommendations';
 
-export const connectDatabase = async (): Promise<void> => {
+export const connectDatabase = async (): Promise<Db> => {
   try {
     mongoClient = new MongoClient(MONGO_URI);
     await mongoClient.connect();
@@ -67,10 +67,19 @@ export const connectDatabase = async (): Promise<void> => {
     const recommendationsCollection = database.collection(RECOMMENDATIONS_COLLECTION);
     await recommendationsCollection.createIndex({ applicationId: 1, documentName: 1, version: 1 }, { unique: true });
     await recommendationsCollection.createIndex({ applicationId: 1 });
+    
+    return database;
   } catch (error) {
     console.error('❌ Failed to connect to MongoDB:', error);
     throw error;
   }
+};
+
+export const getDatabase = (): Db => {
+  if (!database) {
+    throw new Error('Database not connected');
+  }
+  return database;
 };
 
 export const disconnectDatabase = async (): Promise<void> => {

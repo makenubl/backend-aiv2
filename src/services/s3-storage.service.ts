@@ -470,3 +470,60 @@ export const checkS3Connection = async (): Promise<boolean> => {
     return false;
   }
 };
+
+/**
+ * Direct upload to S3 - for project tracker wizard
+ * This bypasses the folder system for temporary wizard uploads
+ */
+export const uploadFileDirect = async (
+  buffer: Buffer,
+  s3Key: string,
+  mimeType: string,
+  originalName: string,
+  userEmail?: string
+): Promise<{ s3Key: string; s3Url: string; size: number }> => {
+  await initS3Storage();
+
+  const upload = new Upload({
+    client: s3Client,
+    params: {
+      Bucket: S3_BUCKET_NAME,
+      Key: s3Key,
+      Body: buffer,
+      ContentType: mimeType,
+      Metadata: {
+        'original-name': originalName,
+        'uploaded-by': userEmail || 'unknown',
+      },
+    },
+  });
+
+  await upload.done();
+
+  const s3Url = `https://${S3_BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${s3Key}`;
+
+  return {
+    s3Key,
+    s3Url,
+    size: buffer.length,
+  };
+};
+
+/**
+ * Delete file from S3 directly by key - for project tracker wizard
+ */
+export const deleteFileDirect = async (s3Key: string): Promise<boolean> => {
+  await initS3Storage();
+
+  try {
+    await s3Client.send(new DeleteObjectCommand({
+      Bucket: S3_BUCKET_NAME,
+      Key: s3Key,
+    }));
+    console.log(`✅ File deleted from S3: ${s3Key}`);
+    return true;
+  } catch (e) {
+    console.warn('Could not delete S3 file:', e);
+    return false;
+  }
+};

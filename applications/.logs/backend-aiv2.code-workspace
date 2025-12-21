@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../frontend-aiv2"
+		}
+	],
+	"settings": {
+		"git.ignoreLimitWarning": true
+	}
+}

@@ -1,0 +1,8 @@
+SPRINT PLANNING - Sprint 23
+
+ACTION ITEMS:
+1. @john.smith - Complete API docs by Jan 15
+2. @sarah.jones - Review auth module PRs
+3. @mike.chen - Deploy staging updates
+4. @external.vendor@acme.com - Deliver security report
+5. @lisa.wong - Create UAT test cases

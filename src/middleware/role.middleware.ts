@@ -34,6 +34,17 @@ export const PERMISSIONS: Record<string, readonly UserRole[]> = {
   // Settings
   'settings:access': ['admin'],
   'users:manage': ['admin'],
+  
+  // Project Tracker Module
+  'projects:view': ['admin', 'evaluator', 'reviewer'],
+  'projects:manage': ['admin', 'evaluator'],
+  'projects:delete': ['admin'],
+  'tasks:view': ['admin', 'evaluator', 'reviewer'],
+  'tasks:manage': ['admin', 'evaluator'],
+  'vendors:view': ['admin', 'evaluator', 'reviewer'],
+  'vendors:manage': ['admin'],
+  'onedrive:manage': ['admin'],
+  'ai:trigger': ['admin', 'evaluator'],
 };
 
 export type Permission = keyof typeof PERMISSIONS;

@@ -9,5 +9,20 @@
       "fileName": "cheat-sheet.pdf"
     },
     "timestamp": "2025-12-16T06:47:37.418Z"
+  },
+  {
+    "id": "chat-PVARA-TEST-1765868998811",
+    "userEmail": "usman@pvara.gov.pk",
+    "userRole": "admin",
+    "action": "chat",
+    "folder": "PVARA-TEST",
+    "meta": {
+      "message": "review the contents of this documents",
+      "applied": 0,
+      "reply": "✅ **Compliant Areas**\n\n1. **Overall Structure & Clarity**\n   - Clear regulatory architecture: Parts ",
+      "document": "_Updated__PVARA_NO_OBJECTION_CERTIFICATE_REGULATIONS__November_2025_1000021938.2_.pdf"
+    },
+    "timestamp": "2025-12-16T07:09:58.812Z",
+    "document": "_Updated__PVARA_NO_OBJECTION_CERTIFICATE_REGULATIONS__November_2025_1000021938.2_.pdf"
   }
 ]

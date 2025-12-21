@@ -1,4 +1,4 @@
-import { Collection } from 'mongodb';
+import { Db, Collection } from 'mongodb';
 interface User {
     _id?: string;
     username: string;
@@ -33,7 +33,8 @@ interface DocumentRecommendationTrail {
     createdAt: Date;
     updatedAt: Date;
 }
-export declare const connectDatabase: () => Promise<void>;
+export declare const connectDatabase: () => Promise<Db>;
+export declare const getDatabase: () => Db;
 export declare const disconnectDatabase: () => Promise<void>;
 export declare const getUsersCollection: () => Collection<User>;
 export declare const findUserByUsername: (username: string) => Promise<User | null>;
@@ -54,7 +55,7 @@ export declare const getRecommendationsTrail: (applicationId: string, documentNa
 export declare const updateRecommendationStatus: (applicationId: string, documentName: string, version: number, ids: string[], status: "accepted" | "rejected") => Promise<void>;
 export declare const deleteRecommendationsForDocument: (applicationId: string, documentName: string) => Promise<void>;
 declare const _default: {
-    connectDatabase: () => Promise<void>;
+    connectDatabase: () => Promise<Db>;
     disconnectDatabase: () => Promise<void>;
     getUsersCollection: () => Collection<User>;
     findUserByUsername: (username: string) => Promise<User | null>;
