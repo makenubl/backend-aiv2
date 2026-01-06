@@ -18,7 +18,7 @@ if (!process.env.OPENAI_API_KEY) {
 export const config = {
   PORT: process.env.PORT || 3001,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
-  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o',
+  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-5.2',
   OPENAI_MAX_TOKENS: parseInt(process.env.OPENAI_MAX_TOKENS || '16000', 10),
   OPENAI_ASSISTANT_ID: process.env.OPENAI_ASSISTANT_ID || '',
   OPENAI_GLOBAL_DAILY_BUDGET_TOKENS: parseInt(process.env.OPENAI_GLOBAL_DAILY_BUDGET_TOKENS || '500000', 10),

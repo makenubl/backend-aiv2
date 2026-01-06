@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { config } from '../config';
 import { listRecommendations, acceptOrRejectRecommendations } from '../services/recommendations.service';
-import { openAIRequestManager, TokenUsage } from '../services/openai-request-manager';
+import { openAIRequestManager } from '../services/openai-request-manager';
 import { appendActivity, readActivities } from '../services/activity-log.service';
 import { deleteRecommendationsForDocument } from '../services/database.service';
 import pdfParse from 'pdf-parse';
@@ -26,46 +26,40 @@ const useS3Storage = (): boolean => {
   return STORAGE_MODE === 's3' && s3Storage.isS3Configured();
 };
 
-// Response type for OpenAI Responses API
-interface OpenAIResponsesData {
-  status?: string;
-  output?: Array<{
-    type: string;
-    content?: Array<{
-      type: string;
-      text?: string;
-    }>;
-  }>;
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
-  usage?: TokenUsage;
+// Check if model supports reasoning (o1, o3, etc.)
+function isReasoningModel(model: string): boolean {
+  return model.startsWith('o1') || model.startsWith('o3') || model.includes('reasoning');
 }
 
-// Helper function for new OpenAI Responses API (gpt-5.1)
+// Helper function for OpenAI API - uses Responses API for reasoning models, Chat Completions for others
 async function callOpenAIResponses(
   input: string,
   options?: { reasoning?: boolean; webSearch?: boolean },
   metadata?: { tenantId?: string; cacheKey?: string; requestName?: string }
 ): Promise<string> {
-  const url = 'https://api.openai.com/v1/responses';
-  const body: any = {
-    model: config.OPENAI_MODEL || 'gpt-5.1',
-    input,
-  };
-
-  if (options?.reasoning) {
-    body.reasoning = { effort: 'low' };
-  }
-
-  if (options?.webSearch) {
-    body.tools = [{ type: 'web_search_preview' }];
-  }
+  const model = config.OPENAI_MODEL || 'gpt-4o';
+  const useReasoningAPI = isReasoningModel(model) && options?.reasoning;
+  
+  // Use Responses API for reasoning models, Chat Completions API for standard models
+  const url = useReasoningAPI 
+    ? 'https://api.openai.com/v1/responses'
+    : 'https://api.openai.com/v1/chat/completions';
+  
+  const body: any = useReasoningAPI
+    ? {
+        model,
+        input,
+        reasoning: { effort: 'low' },
+        ...(options?.webSearch && { tools: [{ type: 'web_search_preview' }] })
+      }
+    : {
+        model,
+        messages: [{ role: 'user', content: input }],
+        max_completion_tokens: config.OPENAI_MAX_TOKENS || 16000,
+      };
 
   const inputLength = typeof input === 'string' ? input.length : JSON.stringify(input).length;
-  console.log(`🤖 [OpenAI] Starting request - Model: ${body.model}, Input: ${inputLength} chars, Reasoning: ${options?.reasoning || false}`);
+  console.log(`🤖 [OpenAI] Starting request - Model: ${model}, API: ${useReasoningAPI ? 'Responses' : 'Chat'}, Input: ${inputLength} chars`);
 
   return openAIRequestManager.execute<string>({
     tenantId: metadata?.tenantId,
@@ -96,10 +90,11 @@ async function callOpenAIResponses(
         throw new Error(`OpenAI API error: ${response.statusText}`);
       }
 
-      const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
+      const data = await response.json() as any;
       const totalTime = Date.now() - startedAt;
-      console.log(`✅ [OpenAI] Response received - Status: ${data.status}, Time: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
+      console.log(`✅ [OpenAI] Response received - Time: ${totalTime}ms (${(totalTime/1000).toFixed(1)}s)`);
       
+      // Handle Responses API format
       if (data.output && Array.isArray(data.output)) {
         for (const item of data.output) {
           if (item.type === 'message' && Array.isArray(item.content)) {
@@ -113,8 +108,13 @@ async function callOpenAIResponses(
         }
       }
       
-      const fallback = data.choices?.[0]?.message?.content || '';
-      return { value: fallback, usage: data.usage };
+      // Handle Chat Completions API format
+      if (data.choices && data.choices[0]?.message?.content) {
+        console.log(`📊 [OpenAI] Output: ${data.choices[0].message.content.length} chars`);
+        return { value: data.choices[0].message.content, usage: data.usage };
+      }
+      
+      return { value: '', usage: data.usage };
     }
   });
 }

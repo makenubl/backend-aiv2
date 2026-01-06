@@ -24,5 +24,49 @@
     },
     "timestamp": "2025-12-16T07:09:58.812Z",
     "document": "_Updated__PVARA_NO_OBJECTION_CERTIFICATE_REGULATIONS__November_2025_1000021938.2_.pdf"
+  },
+  {
+    "id": "delete-file-HTX-1767685762408",
+    "userEmail": "talal@pvara.gov.pk",
+    "userRole": "admin",
+    "action": "delete-file",
+    "folder": "HTX",
+    "meta": {
+      "fileName": "Address_proof.pdf"
+    },
+    "timestamp": "2026-01-06T07:49:22.408Z"
+  },
+  {
+    "id": "delete-file-HTX-1767685763012",
+    "userEmail": "talal@pvara.gov.pk",
+    "userRole": "admin",
+    "action": "delete-file",
+    "folder": "HTX",
+    "meta": {
+      "fileName": "address_proof-_Sunny_Qin.pdf"
+    },
+    "timestamp": "2026-01-06T07:49:23.013Z"
+  },
+  {
+    "id": "delete-file-HTX-1767685763622",
+    "userEmail": "talal@pvara.gov.pk",
+    "userRole": "admin",
+    "action": "delete-file",
+    "folder": "HTX",
+    "meta": {
+      "fileName": "Address_Proof-_Lee_Sing_To.pdf"
+    },
+    "timestamp": "2026-01-06T07:49:23.622Z"
+  },
+  {
+    "id": "delete-file-HTX-1767685764222",
+    "userEmail": "talal@pvara.gov.pk",
+    "userRole": "admin",
+    "action": "delete-file",
+    "folder": "HTX",
+    "meta": {
+      "fileName": "AAT-_ryan.pdf"
+    },
+    "timestamp": "2026-01-06T07:49:24.222Z"
   }
 ]

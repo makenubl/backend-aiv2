@@ -5,39 +5,40 @@ import mammoth from 'mammoth';
 import { documentAnalyzerService, DocumentAnalysis, DocumentCategory } from './document-analyzer.service';
 import { saveEvaluation, getEvaluation, deleteEvaluation } from './database.service';
 import { config } from '../config';
-import { openAIRequestManager, TokenUsage } from './openai-request-manager';
+import { openAIRequestManager } from './openai-request-manager';
 
-// Response type for OpenAI Responses API
-interface OpenAIResponsesData {
-  status?: string;
-  output?: Array<{
-    type: string;
-    content?: Array<{
-      type: string;
-      text?: string;
-    }>;
-  }>;
-  error?: { message: string };
-  usage?: TokenUsage;
+// Check if model supports reasoning (o1, o3, etc.)
+function isReasoningModel(model: string): boolean {
+  return model.startsWith('o1') || model.startsWith('o3') || model.includes('reasoning');
 }
 
-// Helper function for OpenAI Responses API (gpt-5.1)
+// Helper function for OpenAI API - uses Responses API for reasoning models, Chat Completions for others
 async function callOpenAIResponsesAPI(
   input: string,
   options?: { reasoning?: boolean },
   metadata?: { tenantId?: string; cacheKey?: string; requestName?: string }
 ): Promise<string> {
-  const url = 'https://api.openai.com/v1/responses';
-  const body: any = {
-    model: config.OPENAI_MODEL || 'gpt-5.1',
-    input,
-  };
+  const model = config.OPENAI_MODEL || 'gpt-4o';
+  const useReasoningAPI = isReasoningModel(model) && options?.reasoning;
+  
+  // Use Responses API for reasoning models, Chat Completions API for standard models
+  const url = useReasoningAPI 
+    ? 'https://api.openai.com/v1/responses'
+    : 'https://api.openai.com/v1/chat/completions';
+  
+  const body: any = useReasoningAPI
+    ? {
+        model,
+        input,
+        reasoning: { effort: 'medium' }
+      }
+    : {
+        model,
+        messages: [{ role: 'user', content: input }],
+        max_completion_tokens: config.OPENAI_MAX_TOKENS || 16000,
+      };
 
-  if (options?.reasoning) {
-    body.reasoning = { effort: 'medium' };
-  }
-
-  console.log(`🤖 [OpenAI Responses API] Generating AI Insights - Model: ${body.model}`);
+  console.log(`🤖 [OpenAI] Generating AI Insights - Model: ${model}, API: ${useReasoningAPI ? 'Responses' : 'Chat Completions'}`);
 
   return openAIRequestManager.execute<string>({
     tenantId: metadata?.tenantId,
@@ -67,10 +68,11 @@ async function callOpenAIResponsesAPI(
         throw new Error(`OpenAI API error: ${response.statusText}`);
       }
 
-      const data: OpenAIResponsesData = await response.json() as OpenAIResponsesData;
+      const data = await response.json() as any;
       const totalTime = Date.now() - startedAt;
       console.log(`✅ [OpenAI] AI Insights generated - Time: ${totalTime}ms`);
 
+      // Handle Responses API format
       if (data.output && Array.isArray(data.output)) {
         for (const item of data.output) {
           if (item.type === 'message' && Array.isArray(item.content)) {
@@ -81,6 +83,11 @@ async function callOpenAIResponsesAPI(
             }
           }
         }
+      }
+      
+      // Handle Chat Completions API format
+      if (data.choices && data.choices[0]?.message?.content) {
+        return { value: data.choices[0].message.content, usage: data.usage };
       }
 
       return { value: '', usage: data.usage };
@@ -460,24 +467,22 @@ class ApplicationFolderService {
     console.log(`📄 Selected ${documents.length} documents`);
     console.log(`✅ Using ${checklists.length} regulatory checklists`);
 
-    // Helper function to read file content
+    // Import S3 storage service for reading files
+    const { getFileBuffer } = await import('./s3-storage.service');
+
+    // Helper function to read file content from S3
     const readDocumentContent = async (fileName: string): Promise<string> => {
       try {
-        // Determine the document path
-        const workspaceRoot = path.join(process.cwd(), '..');
-        let basePath = path.join(workspaceRoot, 'applications');
-        if (!fs.existsSync(basePath)) {
-          basePath = path.join(process.cwd(), 'applications');
-        }
-        const filePath = path.join(basePath, folder, 'documents', fileName);
+        // Download file from S3
+        console.log(`📥 Downloading from S3: ${folder}/${fileName}`);
+        const buffer = await getFileBuffer(folder, fileName);
         
-        if (!fs.existsSync(filePath)) {
-          console.warn(`⚠️ File not found: ${filePath}`);
-          return `[File not found: ${fileName}]`;
+        if (!buffer) {
+          console.warn(`⚠️ File not found in S3: ${folder}/${fileName}`);
+          return `[File not found in S3: ${fileName}]`;
         }
 
-        const stats = fs.statSync(filePath);
-        if (stats.size === 0) {
+        if (buffer.length === 0) {
           return `[File is empty: ${fileName}]`;
         }
 
@@ -485,8 +490,7 @@ class ApplicationFolderService {
         
         // Parse PDF files
         if (lower.endsWith('.pdf')) {
-          console.log(`📄 Parsing PDF: ${fileName}`);
-          const buffer = fs.readFileSync(filePath);
+          console.log(`📄 Parsing PDF from S3: ${fileName}`);
           try {
             const data = await pdfParse(buffer);
             const text = data.text || '';
@@ -500,9 +504,10 @@ class ApplicationFolderService {
         
         // Parse DOCX files
         if (lower.endsWith('.docx')) {
-          console.log(`📄 Parsing DOCX: ${fileName}`);
+          console.log(`📄 Parsing DOCX from S3: ${fileName}`);
           try {
-            const result = await mammoth.extractRawText({ path: filePath });
+            // mammoth can accept a buffer directly
+            const result = await mammoth.extractRawText({ buffer: buffer });
             const text = result.value || '';
             return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
           } catch (docxErr) {
@@ -511,16 +516,54 @@ class ApplicationFolderService {
           }
         }
         
+        // Parse DOC files (older Word format)
+        if (lower.endsWith('.doc')) {
+          console.log(`📄 Parsing DOC from S3: ${fileName}`);
+          try {
+            // Try mammoth for .doc files (may work for some)
+            const result = await mammoth.extractRawText({ buffer: buffer });
+            const text = result.value || '';
+            return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+          } catch (docErr) {
+            console.error(`Error parsing DOC ${fileName}:`, docErr);
+            return `[Error parsing DOC: ${fileName}]`;
+          }
+        }
+        
+        // Parse Excel files
+        if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
+          console.log(`📄 Parsing Excel from S3: ${fileName}`);
+          try {
+            const XLSX = await import('xlsx');
+            const workbook = XLSX.read(buffer, { type: 'buffer' });
+            let text = '';
+            for (const sheetName of workbook.SheetNames) {
+              const sheet = workbook.Sheets[sheetName];
+              const csv = XLSX.utils.sheet_to_csv(sheet);
+              text += `\n=== Sheet: ${sheetName} ===\n${csv}`;
+            }
+            return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+          } catch (xlsErr) {
+            console.error(`Error parsing Excel ${fileName}:`, xlsErr);
+            return `[Error parsing Excel: ${fileName}]`;
+          }
+        }
+        
         // Plain text files
         if (lower.endsWith('.txt') || lower.endsWith('.json') || lower.endsWith('.md')) {
-          const text = fs.readFileSync(filePath, 'utf-8');
+          const text = buffer.toString('utf-8');
           return text.length > 10000 ? text.substring(0, 10000) + '\n... [truncated]' : text;
+        }
+        
+        // Image files - return placeholder (can't extract text from images without OCR)
+        if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')) {
+          return `[Image file: ${fileName} - content cannot be extracted without OCR]`;
         }
         
         return `[Unsupported file format: ${fileName}]`;
       } catch (err) {
-        console.error(`Error reading ${fileName}:`, err);
-        return `[Error reading file: ${fileName}]`;
+        console.error(`Error reading ${fileName} from S3:`, err);
+        return `[Error reading file from S3: ${fileName}]`;
       }
     };
 
