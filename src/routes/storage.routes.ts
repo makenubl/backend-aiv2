@@ -393,15 +393,22 @@ const diskStorage = multer.diskStorage({
 
 const memoryStorage = multer.memoryStorage();
 
+// Log storage mode for debugging
+console.log(`📁 Storage routes - Mode: ${STORAGE_MODE}, S3 Configured: ${s3Storage.isS3Configured()}, Using S3: ${useS3Storage()}, Serverless: ${isServerless()}`);
+
 // Choose storage based on environment - use memory storage for S3 or serverless
 const upload = multer({ 
   storage: (useS3Storage() || isServerless()) ? memoryStorage : diskStorage,
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit per file
 });
 
 // Upload one or multiple files to a folder
 // Requires: storage:upload permission (admin or evaluator)
-router.post('/upload', requirePermission('storage:upload'), upload.array('files', 20), async (req, res) => {
+router.post('/upload', requirePermission('storage:upload'), (req, _res, next) => {
+  console.log('📤 Storage upload request received');
+  console.log('   Headers:', JSON.stringify(req.headers['content-type']));
+  next();
+}, upload.any(), async (req, res) => {
   const folderName = String(req.body.folder || req.query.folder || '');
   if (!folderName) {
     return res.status(400).json({ error: 'Target folder is required' });
